@@ -300,7 +300,7 @@ async function handle(request: Request, env: Env) {
       ).first()),
       storageReady: !!(await storageConfig(env)),
       limits: { global: 20, perUser: 5, perDevice: 5 },
-      version: "1.0.10",
+      version: "1.1.0",
     });
   const b = method === "POST" || method === "PATCH" ? await parse(request) : {};
   if (path === "/api/setup" && method === "POST") {
