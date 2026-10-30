@@ -122,7 +122,7 @@ export function ExportDialog({request,settings,onClose,notify}:any){
  }catch(e:any){if(current())setError(e.message)}finally{pending.current=false;if(active.current)setSaving(false)}};
  return <Modal title="导出链接" onClose={close}>
   <p>表格布局</p><div className="actions"><label className="radio"><input type="radio" name="export-layout" checked={layout==='product'} onChange={()=>{setLayout('product');setError('')}}/>按产品（一行一套图）</label><label className="radio"><input type="radio" name="export-layout" checked={layout==='detail'} onChange={()=>{setLayout('detail');setError('')}}/>逐张明细</label></div>
-  {layout==='product'&&<div className="notice"><Info size={18}/><span>按产品文件夹分行：产品编号、图片1、图片2……。数字文件名对应图片列，缺失编号留空；产品编号保留前导零。</span></div>}
+  {layout==='product'&&<div className="notice"><Info size={18}/><span>每个文件夹一行：文件夹名、图片1、图片2……。图片按文件名自然排序，支持任意文件名；A列取直接上级文件夹名，保留前导零。</span></div>}
   <p>导出格式</p><div className="actions"><label className="radio"><input type="radio" name="export-format" checked={format==='xlsx'} onChange={()=>setFormat('xlsx')}/>Excel (.xlsx)</label><label className="radio"><input type="radio" name="export-format" checked={format==='csv'} onChange={()=>setFormat('csv')}/>CSV (.csv)</label></div>
   <div className="checkbox-list"><label><input checked readOnly type="checkbox"/>仅导出上传成功、未过期的图片</label></div>
   {error&&<div role="alert" className="notice danger">{error}</div>}
