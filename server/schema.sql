@@ -1,0 +1,18 @@
+PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE, displayName TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','employee')), status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')), passwordHash TEXT NOT NULL, mustChangePassword INTEGER NOT NULL DEFAULT 1, permissions TEXT NOT NULL, createdAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')), createdAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS user_groups (userId TEXT NOT NULL REFERENCES users(id), groupId TEXT NOT NULL REFERENCES groups(id), PRIMARY KEY(userId,groupId));
+CREATE TABLE IF NOT EXISTS sessions (tokenHash TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id), deviceId TEXT NOT NULL, expiresAt INTEGER NOT NULL, lastSeen INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS sessions_user ON sessions(userId,expiresAt);
+CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id), groupId TEXT NOT NULL REFERENCES groups(id), name TEXT NOT NULL, createdAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, clientId TEXT NOT NULL, taskId TEXT NOT NULL REFERENCES tasks(id), groupId TEXT NOT NULL REFERENCES groups(id), userId TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, relativePath TEXT NOT NULL, size INTEGER NOT NULL, contentType TEXT NOT NULL, sha256 TEXT NOT NULL, objectKey TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','uploading','success','failed','expired','deleted')), error TEXT, createdAt TEXT NOT NULL, expiresAt TEXT NOT NULL, completedAt TEXT, UNIQUE(taskId,clientId));
+CREATE INDEX IF NOT EXISTS files_group ON files(groupId,createdAt);
+CREATE INDEX IF NOT EXISTS files_task ON files(taskId);
+CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, fileId TEXT NOT NULL REFERENCES files(id), userId TEXT NOT NULL REFERENCES users(id), deviceId TEXT NOT NULL, expiresAt INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS leases_expiry ON leases(expiresAt);
+CREATE INDEX IF NOT EXISTS leases_user ON leases(userId,expiresAt);
+CREATE INDEX IF NOT EXISTS leases_device ON leases(deviceId,expiresAt);
+CREATE UNIQUE INDEX IF NOT EXISTS leases_file ON leases(fileId);
+CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, userId TEXT, action TEXT NOT NULL, detail TEXT NOT NULL, createdAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS login_attempts (key TEXT PRIMARY KEY, attempts INTEGER NOT NULL, resetAt INTEGER NOT NULL);

@@ -1,0 +1,17 @@
+{
+  "$schema":"./node_modules/wrangler/config-schema.json",
+  "name":"yuntu-workbench",
+  "main":"build/entry.ts",
+  "compatibility_date":"2026-10-29",
+  "compatibility_flags":["nodejs_compat"],
+  "workers_dev":true,
+  "triggers":{"crons":["0 * * * *"]},
+  "observability":{"enabled":true,"head_sampling_rate":0.1},
+  "vars":{
+    "R2_ENDPOINT":"https://e4ae0f44249c105791d1e64969abc669.r2.cloudflarestorage.com",
+    "R2_BUCKET_NAME":"yuntu-images-20261029",
+    "PUBLIC_BASE_URL":"https://yuntu-workbench.gy1207981728.workers.dev"
+  },
+  "d1_databases":[{"binding":"DB","database_name":"yuntu-workbench","database_id":"6bda8054-22fa-4768-8312-04822ce0efc7"}],
+  "r2_buckets":[{"binding":"BUCKET","bucket_name":"yuntu-images-20261029"}]
+}

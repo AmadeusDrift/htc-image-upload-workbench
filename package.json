@@ -1,0 +1,67 @@
+{
+  "name": "yuntu-workbench",
+  "version": "1.0.7",
+  "private": true,
+  "description": "Company R2 image upload workbench",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build:web": "vite build",
+    "build:server": "node scripts/build-worker.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "desktop": "electron .",
+    "build:icons": "node scripts/build-icons.cjs",
+    "pack:win": "electron-builder --win portable --x64 --publish never"
+  },
+  "build": {
+    "appId": "com.yuntu.workbench",
+    "productName": "云图工作台",
+    "directories": {
+      "output": "../云图工作台安装包"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "assets/**/*",
+      "package.json",
+      "server.json"
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "assets/app.ico",
+      "signExecutable": false
+    },
+    "artifactName": "云图工作台-${version}-${arch}.${ext}",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/@img/**/*"
+    ]
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20",
+    "exceljs": "^4.4.0",
+    "lucide-react": "^1.64.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261029.1",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "happy-dom": "^21.0.4",
+    "miniflare": "^5.20261023.2-beta",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5",
+    "wrangler": "^4.155.0"
+  }
+}

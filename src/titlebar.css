@@ -1,0 +1,17 @@
+.desktop-shell{--desktop-titlebar-height:36px}
+.desktop-shell #root{padding-top:var(--desktop-titlebar-height)}
+.desktop-titlebar{position:fixed;inset:0 0 auto;height:36px;z-index:110;display:flex;align-items:center;user-select:none;background:linear-gradient(90deg,#edf5ff 0%,#f8fbff 65%,#f0f6ff 100%);border-bottom:1px solid #dae6f6;color:#28456e;-webkit-app-region:drag;app-region:drag}
+.desktop-titlebar-brand{display:flex;align-items:center;gap:8px;padding:0 16px;height:36px;font-family:'Microsoft YaHei UI','Segoe UI',sans-serif;font-size:12px;font-weight:600;letter-spacing:.35px;flex-shrink:0;-webkit-app-region:no-drag;app-region:no-drag}
+.desktop-titlebar-brand svg{color:#316dff;stroke-width:2.6}
+.desktop-titlebar-drag{height:100%;flex:1;-webkit-app-region:drag;app-region:drag}
+.desktop-window-controls{height:100%;display:flex;align-items:stretch;-webkit-app-region:no-drag;app-region:no-drag}
+.desktop-window-controls button{height:36px;min-height:36px;width:46px;padding:0;border:0;border-radius:0;box-shadow:none;background:transparent;color:#526d96;-webkit-app-region:no-drag;app-region:no-drag}
+.desktop-window-controls button:hover{background:#dceaff;color:#1e59c2;border:0}
+.desktop-window-controls button:focus-visible{outline:2px solid #6f9cff;outline-offset:-3px}
+.desktop-window-controls .desktop-window-close:hover{background:#e64554;color:#fff}
+.desktop-window-controls .restore-icon{transform:rotate(180deg)}
+.desktop-shell .app,.desktop-shell .login{min-height:calc(100vh - var(--desktop-titlebar-height))}
+.desktop-shell .sidebar{top:var(--desktop-titlebar-height)}
+.desktop-shell .overlay{top:var(--desktop-titlebar-height)}
+@media(max-width:1150px){.desktop-shell .detail,.desktop-shell .editor{top:calc(64px + var(--desktop-titlebar-height))}}
+@media(max-width:760px){.desktop-shell .detail,.desktop-shell .editor{top:calc(60px + var(--desktop-titlebar-height))}}

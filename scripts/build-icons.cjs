@@ -1,0 +1,20 @@
+const fs=require('node:fs');
+const path=require('node:path');
+const React=require('react');
+const {renderToStaticMarkup}=require('react-dom/server');
+const {Cloud}=require('lucide-react');
+const sharp=require('sharp');
+(async()=>{
+ const dir=path.join(__dirname,'../assets');fs.mkdirSync(dir,{recursive:true});
+ const cloud=renderToStaticMarkup(React.createElement(Cloud,{width:352,height:352,color:'#2563EB',strokeWidth:2.6}));
+ const svg='<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect x="8" y="8" width="496" height="496" rx="112" fill="#ECF4FF"/><g transform="translate(80 80)">'+cloud+'</g></svg>';
+ fs.writeFileSync(path.join(dir,'app.svg'),svg);
+ const sizes=[16,20,24,32,40,48,64,128,256];
+ const pngs=await Promise.all(sizes.map(n=>sharp(Buffer.from(svg)).resize(n,n).png().toBuffer()));
+ const head=Buffer.alloc(6+16*sizes.length);head.writeUInt16LE(1,2);head.writeUInt16LE(sizes.length,4);let offset=head.length;
+ pngs.forEach((png,i)=>{const p=6+16*i;head[p]=sizes[i]===256?0:sizes[i];head[p+1]=head[p];head.writeUInt16LE(1,p+4);head.writeUInt16LE(32,p+6);head.writeUInt32LE(png.length,p+8);head.writeUInt32LE(offset,p+12);offset+=png.length});
+ fs.writeFileSync(path.join(dir,'app.ico'),Buffer.concat([head,...pngs]));
+ await sharp(Buffer.from(svg)).png().toFile(path.join(dir,'app.png'));
+ const publicDir=path.join(__dirname,'../public');fs.mkdirSync(publicDir,{recursive:true});fs.copyFileSync(path.join(dir,'app.svg'),path.join(publicDir,'favicon.svg'));fs.copyFileSync(path.join(dir,'app.ico'),path.join(publicDir,'favicon.ico'));
+ console.log('Created cloud logo SVG, PNG and Windows ICO ('+sizes.join(', ')+')');
+})().catch(error=>{console.error(error);process.exitCode=1});
