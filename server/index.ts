@@ -101,6 +101,23 @@ function cleanName(value: unknown, label = "文件名") {
     fail(400, "文件路径无效");
   return result;
 }
+function cursorPage(url: URL) {
+  if (!url.searchParams.has("limit") && !url.searchParams.has("cursor"))
+    return null;
+  const rawLimit = url.searchParams.get("limit") ?? "500";
+  const limit = Number(rawLimit);
+  if (
+    !/^\d+$/.test(rawLimit) ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 500
+  )
+    fail(400, "分页数量必须为1至500的整数");
+  const cursor = url.searchParams.get("cursor") ?? "";
+  if (cursor.length > 200 || /[\u0000-\u001f]/.test(cursor))
+    fail(400, "分页游标无效");
+  return { limit, cursor };
+}
 function permissions(value: unknown): Permissions {
   const p = (value ?? {}) as Record<string, unknown>;
   return {
@@ -256,18 +273,24 @@ async function handle(request: Request, env: Env) {
       !f.contentType.startsWith("image/")
     )
       fail(404, "图片不存在或已过期");
-    const object = method === "HEAD" ? await env.BUCKET.head(f.objectKey) : await env.BUCKET.get(f.objectKey);
+    const object =
+      method === "HEAD"
+        ? await env.BUCKET.head(f.objectKey)
+        : await env.BUCKET.get(f.objectKey);
     if (!object) fail(404, "图片不存在");
-    return new Response(method === "HEAD" ? null : (object as R2ObjectBody).body, {
-      headers: {
-        "Content-Type": f.contentType,
-        "Content-Length": String(object.size),
-        "Cache-Control": "no-store",
-        "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; sandbox",
-        ETag: object.httpEtag,
+    return new Response(
+      method === "HEAD" ? null : (object as R2ObjectBody).body,
+      {
+        headers: {
+          "Content-Type": f.contentType,
+          "Content-Length": String(object.size),
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+          "Content-Security-Policy": "default-src 'none'; sandbox",
+          ETag: object.httpEtag,
+        },
       },
-    });
+    );
   }
   if (path === "/api/health")
     return json({
@@ -277,7 +300,7 @@ async function handle(request: Request, env: Env) {
       ).first()),
       storageReady: !!(await storageConfig(env)),
       limits: { global: 20, perUser: 5, perDevice: 5 },
-      version: "1.0.7",
+      version: "1.0.8",
     });
   const b = method === "POST" || method === "PATCH" ? await parse(request) : {};
   if (path === "/api/setup" && method === "POST") {
@@ -750,13 +773,21 @@ async function handle(request: Request, env: Env) {
         ),
       ),
     );
-    const rows = await env.DB.prepare("SELECT * FROM files WHERE taskId=?")
-      .bind(t!.id)
-      .all<FileRow>();
+    // D1 accepts at most 100 bound parameters. Read only this registration
+    // batch, including idempotent replays, instead of decoding the whole task.
+    const clientIds = [...new Set(files.map((f) => f.clientId))];
+    const rows: FileRow[] = [];
+    for (let start = 0; start < clientIds.length; start += 99) {
+      const chunk = clientIds.slice(start, start + 99);
+      const result = await env.DB.prepare(
+        `SELECT * FROM files WHERE taskId=? AND clientId IN (${chunk.map(() => "?").join(",")})`,
+      )
+        .bind(t.id, ...chunk)
+        .all<FileRow>();
+      rows.push(...result.results);
+    }
     return json({
-      files: rows.results
-        .filter((f) => files.some((x) => x.clientId === f.clientId))
-        .map((f) => fileView(f, url.origin)),
+      files: rows.map((f) => fileView(f, url.origin)),
     });
   }
   const taskId = path.match(/^\/api\/tasks\/([^/]+)$/);
@@ -768,6 +799,21 @@ async function handle(request: Request, env: Env) {
     const ownerCanUpload =
       task.userId === u.id && permissions(JSON.parse(u.permissions)).upload;
     await allow(env, u, task.groupId, ownerCanUpload ? "upload" : "view");
+    const page = cursorPage(url);
+    if (page) {
+      const rows = await env.DB.prepare(
+        "SELECT * FROM files WHERE taskId=? AND id>? ORDER BY id LIMIT ?",
+      )
+        .bind(taskId[1], page.cursor, page.limit + 1)
+        .all<FileRow>();
+      const files = rows.results.slice(0, page.limit);
+      return json({
+        task,
+        files: files.map((f) => fileView(f, url.origin)),
+        nextCursor:
+          rows.results.length > page.limit ? files[files.length - 1].id : null,
+      });
+    }
     return json({
       task,
       files: (
@@ -941,6 +987,20 @@ async function handle(request: Request, env: Env) {
     ]);
     return json({ ok: true });
   }
+  const singleFile = path.match(/^\/api\/files\/([^/]+)$/);
+  if (singleFile && method === "GET") {
+    const file = await env.DB.prepare(
+      "SELECT f.*,t.userId taskOwnerId FROM files f JOIN tasks t ON t.id=f.taskId WHERE f.id=?",
+    )
+      .bind(singleFile[1])
+      .first<FileRow & { taskOwnerId: string }>();
+    if (!file) fail(404, "文件不存在");
+    const ownerCanUpload =
+      file.taskOwnerId === u.id &&
+      permissions(JSON.parse(u.permissions)).upload;
+    await allow(env, u, file.groupId, ownerCanUpload ? "upload" : "view");
+    return json({ file: fileView(file, url.origin) });
+  }
   if ((path === "/api/files" || path === "/api/export") && method === "GET") {
     const exportMode = path.endsWith("export"),
       permission = exportMode ? "export" : "view";
@@ -984,12 +1044,51 @@ async function handle(request: Request, env: Env) {
         }
       }
     }
-    const rows = await env.DB.prepare(
-      `SELECT f.* FROM files f JOIN groups g ON f.groupId=g.id ${where} ORDER BY f.createdAt DESC`,
-    )
-      .bind(...args)
-      .all<FileRow>();
-    const files = rows.results.map((f) => fileView(f, url.origin));
+    const page = exportMode ? cursorPage(url) : null;
+    let nextCursor: string | null = null;
+    let rows: FileRow[];
+    let total = 0;
+    if (exportMode) {
+      if (page) {
+        where += " AND f.id>?";
+        const result = await env.DB.prepare(
+          `SELECT f.* FROM files f JOIN groups g ON f.groupId=g.id ${where} ORDER BY f.id LIMIT ?`,
+        )
+          .bind(...args, page.cursor, page.limit + 1)
+          .all<FileRow>();
+        rows = result.results.slice(0, page.limit);
+        if (result.results.length > page.limit)
+          nextCursor = rows[rows.length - 1].id;
+      } else {
+        rows = (
+          await env.DB.prepare(
+            `SELECT f.* FROM files f JOIN groups g ON f.groupId=g.id ${where} ORDER BY f.createdAt DESC`,
+          )
+            .bind(...args)
+            .all<FileRow>()
+        ).results;
+      }
+    } else {
+      const rawPage = Number(url.searchParams.get("page"));
+      const pageNumber = Number.isFinite(rawPage)
+        ? Math.max(1, Math.floor(rawPage))
+        : 1;
+      const offset = Math.min(Number.MAX_SAFE_INTEGER, (pageNumber - 1) * 100);
+      const count = await env.DB.prepare(
+        `SELECT COUNT(*) total FROM files f JOIN groups g ON f.groupId=g.id ${where}`,
+      )
+        .bind(...args)
+        .first<{ total: number }>();
+      total = count?.total ?? 0;
+      rows = (
+        await env.DB.prepare(
+          `SELECT f.* FROM files f JOIN groups g ON f.groupId=g.id ${where} ORDER BY f.createdAt DESC,f.id DESC LIMIT 100 OFFSET ?`,
+        )
+          .bind(...args, offset)
+          .all<FileRow>()
+      ).results;
+    }
+    const files = rows.map((f) => fileView(f, url.origin));
     if (exportMode)
       return json({
         files: files.map((f) => ({
@@ -1001,11 +1100,11 @@ async function handle(request: Request, env: Env) {
           size: f.size,
           createdAt: f.createdAt,
         })),
+        ...(page ? { nextCursor } : {}),
       });
-    const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
     return json({
-      files: files.slice((page - 1) * 100, page * 100),
-      total: files.length,
+      files,
+      total,
     });
   }
   if (path === "/api/files/delete" && method === "POST") {

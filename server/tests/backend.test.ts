@@ -2,6 +2,7 @@ import { beforeAll, afterAll, describe, it, expect } from "vitest";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { build } from "esbuild";
 import { readFileSync } from "node:fs";
+import worker from "../index";
 let mf: Miniflare;
 let token: string;
 let groupId: string;
@@ -267,7 +268,10 @@ describe("Worker integration", () => {
         "Cache-Control",
       ),
     ).toBe("no-store");
-    const publicHead=await mf.dispatchFetch("http://localhost/img/"+firstId,{method:"HEAD"});
+    const publicHead = await mf.dispatchFetch(
+      "http://localhost/img/" + firstId,
+      { method: "HEAD" },
+    );
     expect(publicHead.status).toBe(200);
     expect(publicHead.headers.get("Content-Type")).toBe("image/png");
     expect(publicHead.headers.get("Content-Length")).toBe("3");
@@ -749,5 +753,338 @@ describe("Worker integration", () => {
         )
       ).status,
     ).toBe(200);
+  });
+  it("bounds registration replies and cursor pages for a 16000-file task", async () => {
+    const task = (
+      await call("/api/tasks", { groupId, name: "Large batch fixture" })
+    ).body.task;
+    const db = await mf.getD1Database("DB");
+    await db
+      .prepare(
+        `WITH RECURSIVE numbers(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM numbers WHERE n<15999) INSERT INTO files(id,clientId,taskId,groupId,userId,name,relativePath,size,contentType,sha256,objectKey,createdAt,expiresAt) SELECT 'bulk-'||printf('%05d',n),'bulk-client-'||n,?,?,?,printf('%05d.png',n),'folder/'||printf('%05d.png',n),3,'image/png',?,'images/bulk-'||printf('%05d',n),?,? FROM numbers`,
+      )
+      .bind(
+        task.id,
+        groupId,
+        task.userId,
+        "e".repeat(64),
+        new Date().toISOString(),
+        new Date(Date.now() + 86400000).toISOString(),
+      )
+      .run();
+    const files = Array.from({ length: 100 }, (_, i) => ({
+      clientId: "bulk-client-" + (15900 + i),
+      name: "replay.png",
+      relativePath: "replay.png",
+      size: 3,
+      contentType: "image/png",
+      sha256: "e".repeat(64),
+    }));
+    const replay = await call("/api/tasks/" + task.id + "/files", { files });
+    expect(replay.status).toBe(200);
+    expect(replay.body.files).toHaveLength(100);
+    expect(new Set(replay.body.files.map((f: any) => f.clientId))).toEqual(
+      new Set(files.map((f) => f.clientId)),
+    );
+    expect(replay.body.files.every((f: any) => f.name !== "replay.png")).toBe(
+      true,
+    );
+    const queries: string[] = [];
+    const trackedDB = new Proxy(db, {
+      get(target, key) {
+        if (key === "prepare")
+          return (sql: string) => {
+            queries.push(sql);
+            return target.prepare(sql);
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const tracked = await worker.fetch(
+      new Request("http://localhost/api/tasks/" + task.id + "/files", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + token,
+          "X-Device-Id": "device-a",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ files }),
+      }),
+      { DB: trackedDB } as Env,
+    );
+    expect(tracked.status).toBe(200);
+    const registrationReads = queries.filter((sql) =>
+      /^SELECT \* FROM files WHERE taskId=/i.test(sql),
+    );
+    expect(registrationReads).toHaveLength(2);
+    expect(
+      registrationReads.every((sql) => sql.includes("clientId IN (")),
+    ).toBe(true);
+    expect(
+      registrationReads.map((sql) => (sql.match(/\?/g) || []).length),
+    ).toEqual([100, 2]);
+    const before = await db
+      .prepare("SELECT * FROM files WHERE taskId=?")
+      .bind(task.id)
+      .all();
+    const bounded = await db
+      .prepare(
+        `SELECT * FROM files WHERE taskId=? AND clientId IN (${files
+          .slice(0, 99)
+          .map(() => "?")
+          .join(",")})`,
+      )
+      .bind(task.id, ...files.slice(0, 99).map((f) => f.clientId))
+      .all();
+    expect(before.meta.rows_read).toBeGreaterThanOrEqual(16000);
+    expect(bounded.meta.rows_read).toBeLessThan(400);
+    console.info(
+      "registration D1 rows_read",
+      JSON.stringify({
+        fixture: 16000,
+        previous: before.meta.rows_read,
+        bounded99: bounded.meta.rows_read,
+      }),
+    );
+    const pagePlan = await db
+      .prepare(
+        "EXPLAIN QUERY PLAN SELECT * FROM files WHERE taskId=? AND id>? ORDER BY id LIMIT ?",
+      )
+      .bind(task.id, "bulk-08000", 501)
+      .all<{ detail: string }>();
+    expect(
+      pagePlan.results.some((row) => row.detail.includes("files_task_id")),
+    ).toBe(true);
+    expect(
+      pagePlan.results.some((row) => /TEMP B-TREE/i.test(row.detail)),
+    ).toBe(false);
+    console.info(
+      "task page query plan",
+      pagePlan.results.map((row) => row.detail).join("; "),
+    );
+    const first = await call("/api/tasks/" + task.id + "?limit=500");
+    expect(first.status).toBe(200);
+    expect(first.body.files).toHaveLength(500);
+    expect(first.body.nextCursor).toBe(first.body.files[499].id);
+    const ids: string[] = first.body.files.map((f: any) => f.id);
+    let cursor = first.body.nextCursor;
+    let pages = 1;
+    while (cursor) {
+      const page = await call(
+        "/api/tasks/" +
+          task.id +
+          "?limit=500&cursor=" +
+          encodeURIComponent(cursor),
+      );
+      expect(page.status).toBe(200);
+      expect(page.body.files.length).toBeLessThanOrEqual(500);
+      ids.push(...page.body.files.map((f: any) => f.id));
+      cursor = page.body.nextCursor;
+      pages++;
+      expect(pages).toBeLessThanOrEqual(32);
+    }
+    expect(pages).toBe(32);
+    expect(ids).toHaveLength(16000);
+    expect(new Set(ids).size).toBe(16000);
+    expect(ids).toEqual([...ids].sort());
+    const listing = await call(
+      "/api/files?taskId=" + task.id + "&search=folder%2F&page=2",
+    );
+    expect(listing.status).toBe(200);
+    expect(listing.body.total).toBe(16000);
+    expect(listing.body.files).toHaveLength(100);
+    await db
+      .prepare("UPDATE files SET status='success' WHERE taskId=?")
+      .bind(task.id)
+      .run();
+    await db
+      .prepare("UPDATE files SET status='failed' WHERE id='bulk-00000'")
+      .run();
+    await db
+      .prepare("UPDATE files SET status='deleted' WHERE id='bulk-00001'")
+      .run();
+    await db
+      .prepare(
+        "UPDATE files SET expiresAt='2000-01-01T00:00:00.000Z' WHERE id='bulk-00002'",
+      )
+      .run();
+    const exported: string[] = [];
+    let exportCursor: string | null = null;
+    let exportPages = 0;
+    do {
+      const result = await call(
+        "/api/export?taskId=" +
+          task.id +
+          "&limit=500" +
+          (exportCursor ? "&cursor=" + encodeURIComponent(exportCursor) : ""),
+      );
+      expect(result.status).toBe(200);
+      expect(result.body.files.length).toBeLessThanOrEqual(500);
+      expect(result.body).toHaveProperty("nextCursor");
+      exported.push(...result.body.files.map((f: any) => f.url));
+      exportCursor = result.body.nextCursor;
+      exportPages++;
+      expect(exportPages).toBeLessThanOrEqual(32);
+    } while (exportCursor);
+    expect(exported).toHaveLength(15997);
+    expect(new Set(exported).size).toBe(15997);
+    expect(
+      exported.some(
+        (u) =>
+          u.endsWith("bulk-00000") ||
+          u.endsWith("bulk-00001") ||
+          u.endsWith("bulk-00002"),
+      ),
+    ).toBe(false);
+    expect(
+      (await call("/api/export?taskId=" + task.id + "&limit=501")).status,
+    ).toBe(400);
+    expect((await call("/api/tasks/" + task.id + "?limit=501")).status).toBe(
+      400,
+    );
+    expect((await call("/api/tasks/" + task.id + "?limit=0")).status).toBe(400);
+    expect(
+      (await call("/api/tasks/" + task.id + "?limit=not-a-number")).status,
+    ).toBe(400);
+    const small = (
+      await call("/api/tasks", { groupId, name: "Legacy task response" })
+    ).body.task;
+    const legacy = await call("/api/tasks/" + small.id);
+    expect(legacy.status).toBe(200);
+    expect(legacy.body.files).toEqual([]);
+    expect(legacy.body).not.toHaveProperty("nextCursor");
+  }, 60000);
+  it("authorizes one-file reconciliation like task details", async () => {
+    const owner = await call(
+      "/api/login",
+      {
+        username: "upload-only",
+        password: "Password123!",
+        deviceId: "one-file-owner",
+      },
+      "",
+    );
+    const task = (
+      await call(
+        "/api/tasks",
+        { groupId, name: "One-file reconciliation" },
+        owner.body.token,
+        "one-file-owner",
+      )
+    ).body.task;
+    const files = await call(
+      "/api/tasks/" + task.id + "/files",
+      {
+        files: [
+          {
+            clientId: "single",
+            name: "single.png",
+            relativePath: "single.png",
+            size: 3,
+            contentType: "image/png",
+            sha256: "f".repeat(64),
+          },
+        ],
+      },
+      owner.body.token,
+      "one-file-owner",
+    );
+    const file = files.body.files[0];
+    expect(
+      (
+        await call(
+          "/api/files/" + file.id,
+          undefined,
+          owner.body.token,
+          "one-file-owner",
+        )
+      ).body.file,
+    ).toEqual(file);
+    expect((await call("/api/files/" + file.id, undefined, "")).status).toBe(
+      401,
+    );
+    await call("/api/users", {
+      username: "one-file-no-view",
+      displayName: "No view",
+      password: "Password123!",
+      groupIds: [groupId],
+      permissions: { upload: true, view: false },
+    });
+    const noView = await call(
+      "/api/login",
+      {
+        username: "one-file-no-view",
+        password: "Password123!",
+        deviceId: "one-file-other",
+      },
+      "",
+    );
+    expect(
+      (
+        await call(
+          "/api/files/" + file.id,
+          undefined,
+          noView.body.token,
+          "one-file-other",
+        )
+      ).status,
+    ).toBe(403);
+    const viewer = await call(
+      "/api/login",
+      { username: "u0", password: "Password123!", deviceId: "one-file-viewer" },
+      "",
+    );
+    expect(
+      (
+        await call(
+          "/api/files/" + file.id,
+          undefined,
+          viewer.body.token,
+          "one-file-viewer",
+        )
+      ).status,
+    ).toBe(200);
+    const privateGroup = (
+      await call("/api/groups", { name: "Single file private group" })
+    ).body.group;
+    const privateTask = (
+      await call("/api/tasks", {
+        groupId: privateGroup.id,
+        name: "Private task",
+      })
+    ).body.task;
+    const privateFiles = await call("/api/tasks/" + privateTask.id + "/files", {
+      files: [
+        {
+          clientId: "private",
+          name: "private.png",
+          relativePath: "private.png",
+          size: 3,
+          contentType: "image/png",
+          sha256: "f".repeat(64),
+        },
+      ],
+    });
+    expect(
+      (
+        await call(
+          "/api/files/" + privateFiles.body.files[0].id,
+          undefined,
+          owner.body.token,
+          "one-file-owner",
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await call(
+          "/api/tasks/" + privateTask.id + "?limit=500",
+          undefined,
+          owner.body.token,
+          "one-file-owner",
+        )
+      ).status,
+    ).toBe(403);
   });
 });

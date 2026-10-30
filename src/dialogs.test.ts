@@ -17,6 +17,12 @@ it.each(['cancel','session'])('does not download an export after %s while its re
  await act(async()=>{finish({files:[{name:'1.jpg',relativePath:'001/1.jpg',url:'https://example.com/image',size:1,createdAt:'2026-10-29'}]})});
  expect(download).not.toHaveBeenCalled();expect(notify).not.toHaveBeenCalled();
 });
+it('collects bounded export pages before creating the selected product workbook',async()=>{
+ const paths:string[]=[];vi.mocked(getToken).mockReturnValue('alice');vi.mocked(api).mockImplementation(async(route:string)=>{paths.push(route);const cursor=new URL('https://example.test'+route).searchParams.get('cursor');return cursor?{files:[{name:'2.jpg',relativePath:'001/2.jpg',url:'https://example.com/second',size:1,createdAt:'2026-10-30'}],nextCursor:null}:{files:[{name:'1.jpg',relativePath:'001/1.jpg',url:'https://example.com/first',size:1,createdAt:'2026-10-30'}],nextCursor:'cursor-1'}});
+ let exported:Blob|undefined;const notify=vi.fn();vi.stubGlobal('URL',class extends URL {static createObjectURL=(blob:Blob)=>{exported=blob;return 'blob:export'};static revokeObjectURL=vi.fn()});
+ await act(async()=>root.render(React.createElement(ExportDialog,{request:{taskId:'task-a'},settings:{exportFormat:'csv'},onClose:vi.fn(),notify})));await act(async()=>{button('导出').click()});
+ expect(paths).toHaveLength(2);expect(paths.every(route=>new URL('https://example.test'+route).searchParams.get('limit')==='500')).toBe(true);expect(new URL('https://example.test'+paths[1]).searchParams.get('cursor')).toBe('cursor-1');const csv=await exported!.text();expect(csv).toContain('https://example.com/first');expect(csv).toContain('https://example.com/second');expect(notify).toHaveBeenCalledWith('已导出 1 个产品、2 张图片链接');
+});
 it('returns to login rather than first-admin setup after initial setup and logout',async()=>{
  vi.mocked(api).mockImplementation(async(route:string)=>{
   if(route==='/health')return {ok:true,initialized:false,storageReady:true};

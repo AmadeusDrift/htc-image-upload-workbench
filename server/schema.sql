@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, userId TEXT NOT NULL REFE
 CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, clientId TEXT NOT NULL, taskId TEXT NOT NULL REFERENCES tasks(id), groupId TEXT NOT NULL REFERENCES groups(id), userId TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, relativePath TEXT NOT NULL, size INTEGER NOT NULL, contentType TEXT NOT NULL, sha256 TEXT NOT NULL, objectKey TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','uploading','success','failed','expired','deleted')), error TEXT, createdAt TEXT NOT NULL, expiresAt TEXT NOT NULL, completedAt TEXT, UNIQUE(taskId,clientId));
 CREATE INDEX IF NOT EXISTS files_group ON files(groupId,createdAt);
 CREATE INDEX IF NOT EXISTS files_task ON files(taskId);
+CREATE INDEX IF NOT EXISTS files_task_id ON files(taskId,id);
 CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, fileId TEXT NOT NULL REFERENCES files(id), userId TEXT NOT NULL REFERENCES users(id), deviceId TEXT NOT NULL, expiresAt INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS leases_expiry ON leases(expiresAt);
 CREATE INDEX IF NOT EXISTS leases_user ON leases(userId,expiresAt);

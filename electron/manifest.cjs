@@ -9,6 +9,7 @@ function text(value,label,max,optional=false){
 }
 function normalizeManifest(input,getSource){
  if(!input||typeof input!=='object'||Array.isArray(input)||input.schemaVersion!==undefined&&input.schemaVersion!==1||!Array.isArray(input.items)||input.items.length>20000)throw Error('上传进度格式无效');
+ if(input.batchMode!==undefined&&input.batchMode!=='chunked-v1')throw Error('上传进度格式无效：批次处理模式');
  const ownerId=text(input.ownerId??'','员工标识',150,true);
  const seen=new Set(),referenced=new Map();
  const items=input.items.map(item=>{
@@ -25,7 +26,7 @@ function normalizeManifest(input,getSource){
   if(output.nativeId){const source=getSource(output.nativeId);if(!source||typeof source.path!=='string'||source.path.length>32768||!path.isAbsolute(source.path)||source.path.includes('\0')||source.size!==output.size||!Number.isFinite(source.mtimeMs)||source.mtimeMs<0)throw Error('上传进度缺少可信的源文件记录，请重新选择图片');referenced.set(output.nativeId,{id:output.nativeId,path:source.path,size:source.size,mtimeMs:source.mtimeMs,...(source.preparedImage===true?{preparedImage:true}:{})})}
   return output;
  });
- return {schemaVersion:1,ownerId,taskId:text(input.taskId,'任务标识',150,true),clientTaskId:text(input.clientTaskId,'客户端任务标识',150,true),groupId:text(input.groupId,'业务账号标识',150,true),items,sources:[...referenced.values()]};
+ return {schemaVersion:1,ownerId,batchMode:input.batchMode,taskId:text(input.taskId,'任务标识',150,true),clientTaskId:text(input.clientTaskId,'客户端任务标识',150,true),groupId:text(input.groupId,'业务账号标识',150,true),items,sources:[...referenced.values()]};
 }
 function parseManifest(raw){
  const input=JSON.parse(raw);const sources=new Map();
@@ -78,6 +79,7 @@ function createCloseCoordinator({isActive,confirm,prepare,abort,flush,confirmFai
  }};return coordinator;
 }
 module.exports={createManifestStore,createCloseCoordinator,normalizeManifest,parseManifest};
+
 
 
 
