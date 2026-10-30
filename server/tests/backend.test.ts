@@ -1087,4 +1087,147 @@ describe("Worker integration", () => {
       ).status,
     ).toBe(403);
   });
+  it("expires at most500 files with one R2 batch and bounded D1 batches, retaining failure retry state", async () => {
+    const db = await mf.getD1Database("DB"),
+      bucket = await mf.getR2Bucket("BUCKET");
+    await db
+      .prepare("UPDATE files SET status='expired' WHERE expiresAt<=?")
+      .bind(new Date().toISOString())
+      .run();
+    const task = (
+      await call("/api/tasks", { groupId, name: "Expiry batch fixture" })
+    ).body.task;
+    await db
+      .prepare(
+        `WITH RECURSIVE numbers(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM numbers WHERE n<500) INSERT INTO files(id,clientId,taskId,groupId,userId,name,relativePath,size,contentType,sha256,objectKey,status,createdAt,expiresAt) SELECT 'expiry-'||printf('%04d',n),'expiry-'||n,?,?,?,'expiry.png','expiry.png',3,'image/png',?,'images/expiry-'||printf('%04d',n),'success',?,'2000-01-01T00:00:00.000Z' FROM numbers`,
+      )
+      .bind(
+        task.id,
+        groupId,
+        task.userId,
+        "e".repeat(64),
+        new Date().toISOString(),
+      )
+      .run();
+    await bucket.put("images/expiry-0000", "abc");
+    await bucket.put("images/expiry-0500", "abc");
+    const sizes: number[] = [],
+      deletions: (string | string[])[] = [];
+    const trackedDB = new Proxy(db, {
+      get(target, key) {
+        if (key === "batch")
+          return (statements: Parameters<typeof db.batch>[0]) => {
+            sizes.push(statements.length);
+            return target.batch(statements);
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const failBucket = new Proxy(bucket, {
+      get(target, key) {
+        if (key === "delete")
+          return async () => {
+            throw new Error("transient R2 failure");
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await expect(
+      worker.scheduled(
+        {} as ScheduledController,
+        { DB: trackedDB, BUCKET: failBucket } as Env,
+      ),
+    ).rejects.toThrow("transient R2 failure");
+    expect(
+      (await db
+        .prepare(
+          "SELECT COUNT(*) n FROM files WHERE taskId=? AND status='success'",
+        )
+        .bind(task.id)
+        .first<{ n: number }>())!.n,
+    ).toBe(501);
+    expect(sizes).toEqual([]);
+    const trackedBucket = new Proxy(bucket, {
+      get(target, key) {
+        if (key === "delete")
+          return async (keys: string | string[]) => {
+            deletions.push(keys);
+            return target.delete(keys);
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await worker.scheduled(
+      {} as ScheduledController,
+      { DB: trackedDB, BUCKET: trackedBucket } as Env,
+    );
+    expect(deletions).toHaveLength(1);
+    expect(Array.isArray(deletions[0])).toBe(true);
+    expect(deletions[0]).toHaveLength(500);
+    expect(sizes).toEqual([...Array(10).fill(100), 3]);
+    expect(
+      (await db
+        .prepare(
+          "SELECT COUNT(*) n FROM files WHERE taskId=? AND status='expired'",
+        )
+        .bind(task.id)
+        .first<{ n: number }>())!.n,
+    ).toBe(500);
+    expect(await bucket.head("images/expiry-0000")).toBeNull();
+    expect(await bucket.head("images/expiry-0500")).not.toBeNull();
+    await worker.scheduled(
+      {} as ScheduledController,
+      { DB: trackedDB, BUCKET: trackedBucket } as Env,
+    );
+    expect(
+      (await db
+        .prepare(
+          "SELECT COUNT(*) n FROM files WHERE taskId=? AND status='expired'",
+        )
+        .bind(task.id)
+        .first<{ n: number }>())!.n,
+    ).toBe(501);
+    expect(await bucket.head("images/expiry-0500")).toBeNull();
+    await db
+      .prepare("INSERT INTO sessions VALUES(?,?,?,?,?)")
+      .bind("cleanup-expired-session", task.userId, "cleanup", 0, 0)
+      .run();
+    await db
+      .prepare("INSERT INTO login_attempts VALUES(?,?,?)")
+      .bind("cleanup-expired-attempt", 1, 0)
+      .run();
+    await db
+      .prepare("INSERT INTO leases VALUES(?,?,?,?,?)")
+      .bind("cleanup-expired-lease", "expiry-0500", task.userId, "cleanup", 0)
+      .run();
+    const deleteCount = deletions.length,
+      batchCount = sizes.length;
+    await worker.scheduled(
+      {} as ScheduledController,
+      { DB: trackedDB, BUCKET: trackedBucket } as Env,
+    );
+    expect(deletions).toHaveLength(deleteCount);
+    expect(sizes.slice(batchCount)).toEqual([3]);
+    expect(
+      await db
+        .prepare("SELECT 1 FROM sessions WHERE tokenHash=?")
+        .bind("cleanup-expired-session")
+        .first(),
+    ).toBeNull();
+    expect(
+      await db
+        .prepare("SELECT 1 FROM login_attempts WHERE key=?")
+        .bind("cleanup-expired-attempt")
+        .first(),
+    ).toBeNull();
+    expect(
+      await db
+        .prepare("SELECT 1 FROM leases WHERE id=?")
+        .bind("cleanup-expired-lease")
+        .first(),
+    ).toBeNull();
+  }, 60000);
 });

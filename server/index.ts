@@ -1178,14 +1178,23 @@ export default {
     )
       .bind(now())
       .all<{ id: string; objectKey: string }>();
-    for (const f of rows.results) {
-      await env.BUCKET.delete(f.objectKey);
-      await env.DB.batch([
-        env.DB.prepare(
-          "UPDATE files SET status='expired' WHERE id=? AND status<>'deleted'",
-        ).bind(f.id),
-        env.DB.prepare("DELETE FROM leases WHERE fileId=?").bind(f.id),
-      ]);
+    if (rows.results.length) {
+      // R2 accepts at most 1000 keys per delete; this query selects at most 500.
+      // Confirm object deletion before changing any expiry records so a failed
+      // R2 operation remains eligible for an idempotent retry next time.
+      await env.BUCKET.delete(rows.results.map((file) => file.objectKey));
+      for (let start = 0; start < rows.results.length; start += 50) {
+        await env.DB.batch(
+          rows.results
+            .slice(start, start + 50)
+            .flatMap((file) => [
+              env.DB.prepare(
+                "UPDATE files SET status='expired' WHERE id=? AND status<>'deleted'",
+              ).bind(file.id),
+              env.DB.prepare("DELETE FROM leases WHERE fileId=?").bind(file.id),
+            ]),
+        );
+      }
     }
     await env.DB.batch([
       env.DB.prepare("DELETE FROM sessions WHERE expiresAt<=?").bind(
