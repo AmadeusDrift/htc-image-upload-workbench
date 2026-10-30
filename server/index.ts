@@ -8,6 +8,7 @@ import {
   verifyPassword,
 } from "./auth";
 import { storageConfig, presign } from "./storage";
+import { handleRelease } from "./releases";
 type Permissions = {
   upload: boolean;
   view: boolean;
@@ -300,7 +301,7 @@ async function handle(request: Request, env: Env) {
       ).first()),
       storageReady: !!(await storageConfig(env)),
       limits: { global: 20, perUser: 5, perDevice: 5 },
-      version: "1.1.0",
+      version: "1.1.1",
     });
   const b = method === "POST" || method === "PATCH" ? await parse(request) : {};
   if (path === "/api/setup" && method === "POST") {
@@ -1144,6 +1145,8 @@ async function handle(request: Request, env: Env) {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
+      const release = await handleRelease(request, env);
+      if (release) return release;
       const r = await handle(request, env);
       r.headers.set("Access-Control-Allow-Origin", "*");
       r.headers.set("Access-Control-Expose-Headers", "Retry-After");

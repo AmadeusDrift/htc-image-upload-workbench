@@ -12,8 +12,12 @@ const {installTitlebar}=require('./titlebar.cjs');
 const {createManifestStore,createCloseCoordinator}=require('./manifest.cjs');
 const {createHashReader}=require('./hash.cjs');
 const {createImagePreparer}=require('./compression.cjs');
+const {createUpdaterController}=require('./updater.cjs');
 
-let uploadActive=false,rendererAvailable=true,closeCoordinator,pendingClose;
+let uploadActive=false,rendererAvailable=true,closeCoordinator,pendingClose,updateController,nativeClosing=false,updateQuitApproved=false;
+function requestClose(){if(updateController?.installing)return Promise.resolve(false);nativeClosing=true;return closeCoordinator.request().finally(()=>{nativeClosing=false;updateController?.refreshBusy()})}
+function isBusy(){return nativeClosing||uploadActive||requests.size>0||hashReader.jobs.size>0||imagePreparer.jobs.size>0}
+async function startNativeWork(operation){updateController?.assertCanStart();try{const work=operation();updateController?.refreshBusy();return await work}finally{updateController?.refreshBusy()}}
 const service=new URL(config.apiBase);if(service.protocol!=='https:')throw Error('Service requires HTTPS');
 const uploadHost=config.uploadHost||'e4ae0f44249c105791d1e64969abc669.r2.cloudflarestorage.com';
 const types={'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.webp':'image/webp'};
@@ -35,7 +39,7 @@ startDesktop({app,log:diagnostics.log,fail:diagnostics.fail,getWindow:()=>win,cr
  diagnostics.log('window-created');
  win.once('ready-to-show',()=>{diagnostics.log('ready-to-show');win.show();win.focus()});
  win.webContents.on('did-fail-load',(_event,code,description,_url,isMainFrame)=>{if(isMainFrame)diagnostics.log('main-load-failed',{code,description})});
- win.webContents.on('render-process-gone',(_event,detail)=>{rendererAvailable=false;diagnostics.log('renderer-crashed',detail);if(closeCoordinator)void closeCoordinator.request().catch(error=>diagnostics.log('close-error',error));else diagnostics.fail(Error('界面进程退出：'+detail.reason))});
+ win.webContents.on('render-process-gone',(_event,detail)=>{rendererAvailable=false;diagnostics.log('renderer-crashed',detail);if(closeCoordinator)void requestClose().catch(error=>diagnostics.log('close-error',error));else diagnostics.fail(Error('界面进程退出：'+detail.reason))});
  win.on('unresponsive',()=>diagnostics.log('window-unresponsive'));
  win.webContents.setWindowOpenHandler(()=>({action:'deny'}));win.webContents.on('will-navigate',event=>event.preventDefault());
  win.webContents.session.setPermissionRequestHandler((_wc,_permission,callback)=>callback(false));
@@ -44,13 +48,13 @@ startDesktop({app,log:diagnostics.log,fail:diagnostics.fail,getWindow:()=>win,cr
  handle('choose-files',async()=>{const result=await dialog.showOpenDialog(win,{properties:['openFile','multiSelections'],filters:[{name:'图片',extensions:['jpg','jpeg','png','webp']}]});return result.canceled?[]:scan(result.filePaths)});
  handle('choose-folder',async(recurse=true)=>{const result=await dialog.showOpenDialog(win,{properties:['openDirectory','multiSelections']});return result.canceled?[]:scan(result.filePaths,recurse===true)});
  handle('dropped',(paths,recurse=true)=>{if(!Array.isArray(paths)||paths.length>20000)throw Error('Invalid selection');return scan(paths,recurse===true)});
- handle('hash',hash);handle('upload',upload);handle('abort',id=>{requests.get(id)?.destroy(Error('上传已暂停'));hashReader.abort(id);imagePreparer.abort(id);return true});
- handle('prepare-image',(id,options)=>imagePreparer.prepare(id,options));
+ handle('hash',id=>startNativeWork(()=>hash(id)));handle('upload',options=>startNativeWork(()=>upload(options)));handle('abort',id=>{requests.get(id)?.destroy(Error('上传已暂停'));hashReader.abort(id);imagePreparer.abort(id);return true});
+ handle('prepare-image',(id,options)=>startNativeWork(()=>imagePreparer.prepare(id,options)));
  handle('abort-preparation',id=>imagePreparer.abort(id));
  handle('release-prepared',ids=>imagePreparer.release(ids));
  handle('manifest-save',data=>manifestStore.save(data));
  handle('manifest-flush',()=>manifestStore.flush());
- handle('upload-active',active=>{if(typeof active!=='boolean')throw Error('Invalid active flag');uploadActive=active;return true});
+ handle('upload-active',active=>{if(typeof active!=='boolean')throw Error('Invalid active flag');if(active)updateController?.assertCanStart();uploadActive=active;updateController?.refreshBusy();return true});
  handle('manifest-load',async()=>{const data=await manifestStore.load();if(!data)return null;const itemsByNative=new Map(data.items.filter(item=>item.nativeId).map(item=>[item.nativeId,item]));for(const source of data.sources){const item=itemsByNative.get(source.id)||{};handles.set(source.id,{path:source.path,size:source.size,mtimeMs:source.mtimeMs,preparedImage:source.preparedImage===true,name:item.name,relativePath:item.relativePath,contentType:item.contentType,originalSize:item.originalSize,compressed:item.compressed,compressionNote:item.compressionNote})}if(data.recoveryWarning)diagnostics.log('manifest-recovered',data.recoveryWarning);const {sources,...visible}=data;return visible});
  handle('ready-to-close',data=>{if(!pendingClose||!data||data.id!==pendingClose.id)return false;const pending=pendingClose;pendingClose=undefined;clearTimeout(pending.timer);if(data.error)pending.reject(Error(String(data.error).slice(0,1000)));else pending.resolve();return true});
  function prepareRendererClose(){
@@ -66,8 +70,18 @@ startDesktop({app,log:diagnostics.log,fail:diagnostics.fail,getWindow:()=>win,cr
   confirmFailure:async error=>{diagnostics.log('close-persistence-warning',error);const result=await dialog.showMessageBox(win,{type:'warning',buttons:['取消退出','仍然退出'],defaultId:0,cancelId:0,message:'最近进度未能完整保存',detail:String(error.message||error)+'\n\n取消退出可保留当前窗口继续处理。仍然退出后，未保存的最新进度可能需要重新核对。'});return result.response===1},
   close:()=>win.close(),
  });
- win.on('close',event=>{if(closeCoordinator.approved)return;event.preventDefault();void closeCoordinator.request().catch(error=>diagnostics.log('close-error',error))});
- diagnostics.log('load-index');await win.loadFile(trustedIndex);diagnostics.log('index-loaded');return win;
+ const {autoUpdater}=require('electron-updater');
+ updateController=createUpdaterController({updater:autoUpdater,supported:app.isPackaged&&process.platform==='win32',currentVersion:app.getVersion(),isBusy,
+  prepare:prepareRendererClose,
+  flush:async()=>{await imagePreparer.drain();await manifestStore.flush()},
+  onState:state=>{if(state.status!=='installing')updateQuitApproved=false;if(!win.isDestroyed()&&!win.webContents.isDestroyed())win.webContents.send('update-state-changed',state)},
+  // Bypass normal close only after strict persistence succeeds; the coordinator's close would quit too early.
+  quitAndInstall:(...args)=>{updateQuitApproved=true;try{const result=autoUpdater.quitAndInstall(...args);if(result===false)updateQuitApproved=false;return result}catch(error){updateQuitApproved=false;throw error}},
+ });
+ handle('update-state',()=>updateController.getState());handle('update-check',()=>updateController.check());handle('update-install',async()=>{await updateController.install();return updateController.getState()});
+ win.on('closed',()=>updateController.dispose());
+ win.on('close',event=>{if(updateQuitApproved||closeCoordinator.approved)return;event.preventDefault();void requestClose().catch(error=>diagnostics.log('close-error',error))});
+ diagnostics.log('load-index');await win.loadFile(trustedIndex);diagnostics.log('index-loaded');updateController.start();return win;
 }});app.on('window-all-closed',()=>app.quit());
 
 

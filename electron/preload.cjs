@@ -3,6 +3,10 @@ let prepareCloseHandler;
 ipcRenderer.on('prepare-close',async(_event,data)=>{let error;try{if(!prepareCloseHandler)throw Error('界面尚未准备好保存最新进度。');await prepareCloseHandler()}catch(failure){error=String(failure?.message||failure).slice(0,1000)}await ipcRenderer.invoke('ready-to-close',{id:data.id,error}).catch(()=>{})});
 contextBridge.exposeInMainWorld('desktop',Object.freeze({
  getConfig:()=>ipcRenderer.invoke('config'),
+ getUpdateState:()=>ipcRenderer.invoke('update-state'),
+ checkForUpdates:()=>ipcRenderer.invoke('update-check'),
+ installUpdate:()=>ipcRenderer.invoke('update-install'),
+ onUpdateStateChanged:callback=>{const listener=(_event,value)=>callback(value);ipcRenderer.on('update-state-changed',listener);return()=>ipcRenderer.removeListener('update-state-changed',listener)},
  getWindowState:()=>ipcRenderer.invoke('window-state'),
  minimizeWindow:()=>ipcRenderer.invoke('window-minimize'),
  toggleMaximize:()=>ipcRenderer.invoke('window-toggle-maximize'),

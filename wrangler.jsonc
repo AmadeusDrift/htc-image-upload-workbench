@@ -13,5 +13,5 @@
     "PUBLIC_BASE_URL":"https://yuntu-workbench.gy1207981728.workers.dev"
   },
   "d1_databases":[{"binding":"DB","database_name":"yuntu-workbench","database_id":"6bda8054-22fa-4768-8312-04822ce0efc7"}],
-  "r2_buckets":[{"binding":"BUCKET","bucket_name":"yuntu-images-20261029"}]
+  "r2_buckets":[{"binding":"BUCKET","bucket_name":"yuntu-images-20261029"},{"binding":"RELEASES","bucket_name":"yuntu-workbench-releases"}]
 }

@@ -27,3 +27,5 @@ Thumbs.db
 *.pfx
 *账号信息*
 *private*.json
+electron/acceptance-main.cjs
+.publish-*.json

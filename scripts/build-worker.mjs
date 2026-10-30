@@ -13,7 +13,7 @@ import assets from './ui-assets.json';
 export default {
  async fetch(request:Request,env:Env){
   const url=new URL(request.url);
-  if(url.pathname.startsWith('/api/')||url.pathname.startsWith('/img/'))return backend.fetch(request,env);
+  if(url.pathname.startsWith('/api/')||url.pathname.startsWith('/img/')||url.pathname.startsWith('/updates/'))return backend.fetch(request,env);
   if(!['GET','HEAD'].includes(request.method))return new Response('Method not allowed',{status:405});
   const map=assets as Record<string,{type:string,data:string}>;
   const asset=map[url.pathname==='/'?'/index.html':url.pathname]||(!url.pathname.split('/').pop()?.includes('.')?map['/index.html']:undefined);

@@ -1,0 +1,14 @@
+.desktop-update{position:relative;flex-shrink:0;margin-right:12px;font-family:'Microsoft YaHei UI','Segoe UI',sans-serif;font-size:11px;-webkit-app-region:no-drag;app-region:no-drag}
+.desktop-update .desktop-update-summary{display:flex;align-items:center;gap:9px;min-height:26px;padding:3px 8px;border:1px solid transparent;border-radius:5px;background:transparent;box-shadow:none;color:#526d96;font-size:11px;line-height:18px}
+.desktop-update .desktop-update-summary:hover,.desktop-update .desktop-update-summary[aria-expanded=true]{background:#e4efff;border-color:#cbdcf5;color:#255bb5}
+.desktop-update button:focus-visible{outline:2px solid #6f9cff;outline-offset:2px}
+.desktop-update .desktop-update-progress{position:absolute;bottom:-2px;left:8px;width:calc(100% - 16px);height:3px;accent-color:#316dff;border:0}
+.desktop-update-panel{position:absolute;right:0;top:33px;width:278px;max-width:calc(100vw - 32px);padding:16px;border:1px solid #d5e3f6;border-radius:9px;background:#fff;box-shadow:0 8px 28px #28456e24;color:#28456e;font-size:12px;user-select:text}
+.desktop-update-panel strong{font-size:13px;font-weight:600}
+.desktop-update-panel p{margin:10px 0;line-height:1.7;overflow-wrap:anywhere}
+.desktop-update-panel [role=alert]{color:#af3746}
+.desktop-update-panel .desktop-update-wait{color:#80651d}
+.desktop-update-panel button{min-height:30px;padding:5px 12px;border:1px solid #c5d8f8;border-radius:5px;background:#edf5ff;color:#245bb7;font-size:12px;box-shadow:none}
+.desktop-update-panel button:hover:enabled{background:#dfecff;border-color:#91b6f3}
+.desktop-update-panel button:disabled{cursor:default;opacity:.55}
+@media(max-width:620px){.desktop-update{margin-right:4px}.desktop-update .desktop-update-summary{gap:5px;padding:3px 5px}}

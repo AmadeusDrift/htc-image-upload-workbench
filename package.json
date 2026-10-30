@@ -1,6 +1,6 @@
 {
   "name": "yuntu-workbench",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "Company R2 image upload workbench",
   "main": "electron/main.cjs",
@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "desktop": "electron .",
     "build:icons": "node scripts/build-icons.cjs",
-    "pack:win": "electron-builder --win portable --x64 --publish never"
+    "pack:win": "electron-builder --win nsis --x64 --publish never"
   },
   "build": {
     "appId": "com.yuntu.workbench",
@@ -25,23 +25,41 @@
       "electron/**/*",
       "assets/**/*",
       "package.json",
-      "server.json"
+      "server.json",
+      "!electron/acceptance-main.cjs"
     ],
     "win": {
       "target": [
-        "portable"
+        "nsis"
       ],
       "icon": "assets/app.ico",
       "signExecutable": false
     },
-    "artifactName": "云图工作台-${version}-${arch}.${ext}",
+    "artifactName": "Yuntu-Workbench-Setup-${version}-${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
       "node_modules/@img/**/*"
+    ],
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://yuntu-workbench.gy1207981728.workers.dev/updates/stable/",
+        "useMultipleRangeRequest": false
+      }
     ]
   },
   "dependencies": {
     "aws4fetch": "^1.0.20",
+    "electron-updater": "6.8.12",
     "exceljs": "^4.4.0",
     "lucide-react": "^1.64.0",
     "react": "^19.3.1",

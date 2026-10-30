@@ -1,5 +1,13 @@
 export interface NativeFile {id:string;name:string;relativePath:string;size:number;contentType:string;originalSize?:number;compressed?:boolean;compressionNote?:string}
+export interface UpdateState {
+ status:'idle'|'checking'|'available'|'downloading'|'ready'|'error'|'unsupported'|'installing';
+ currentVersion:string;version?:string;percent?:number;error?:string;busy:boolean;
+}
 export interface DesktopAPI {
+ getUpdateState?():Promise<UpdateState>;
+ checkForUpdates?():Promise<UpdateState>;
+ installUpdate?():Promise<UpdateState>;
+ onUpdateStateChanged?(callback:(state:UpdateState)=>void):()=>void;
  getWindowState():Promise<{maximized:boolean}>;
  minimizeWindow():Promise<void>;toggleMaximize():Promise<{maximized:boolean}>;closeWindow():Promise<void>;
  onWindowStateChanged(callback:(state:{maximized:boolean})=>void):()=>void;
