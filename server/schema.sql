@@ -15,5 +15,7 @@ CREATE INDEX IF NOT EXISTS leases_expiry ON leases(expiresAt);
 CREATE INDEX IF NOT EXISTS leases_user ON leases(userId,expiresAt);
 CREATE INDEX IF NOT EXISTS leases_device ON leases(deviceId,expiresAt);
 CREATE UNIQUE INDEX IF NOT EXISTS leases_file ON leases(fileId);
+CREATE TABLE IF NOT EXISTS upload_demands (deviceId TEXT NOT NULL, userId TEXT NOT NULL REFERENCES users(id), runId TEXT NOT NULL DEFAULT '', expiresAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(deviceId,runId));
+CREATE INDEX IF NOT EXISTS upload_demands_expiry ON upload_demands(expiresAt);
 CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, userId TEXT, action TEXT NOT NULL, detail TEXT NOT NULL, createdAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_attempts (key TEXT PRIMARY KEY, attempts INTEGER NOT NULL, resetAt INTEGER NOT NULL);

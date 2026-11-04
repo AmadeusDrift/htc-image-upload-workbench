@@ -9,6 +9,7 @@ import {
 } from "./auth";
 import { storageConfig, presign } from "./storage";
 import { handleRelease } from "./releases";
+import { pruneUploadDemands, reserveUpload, stopUploadDemand, uploadDemand } from "./concurrency";
 type Permissions = {
   upload: boolean;
   view: boolean;
@@ -53,7 +54,7 @@ const defaults = {
   exportFormat: "xlsx",
   sort: "name",
   retentionDays: 7,
-  perDevice: 5,
+  perDevice: 20,
   global: 20,
 };
 class HttpError extends Error {
@@ -300,8 +301,8 @@ async function handle(request: Request, env: Env) {
         "SELECT id FROM users LIMIT 1",
       ).first()),
       storageReady: !!(await storageConfig(env)),
-      limits: { global: 20, perUser: 5, perDevice: 5 },
-      version: "1.1.1",
+      limits: { global: 20, perDevice: 20, allocation: "dynamic-device" },
+      version: "1.1.2",
     });
   const b = method === "POST" || method === "PATCH" ? await parse(request) : {};
   if (path === "/api/setup" && method === "POST") {
@@ -390,6 +391,17 @@ async function handle(request: Request, env: Env) {
   if (!path.startsWith("/api/"))
     return new Response("Not found", { status: 404 });
   const { u, device, tokenHash } = await authenticate(request, env);
+  if (path === "/api/uploads/activity" && method === "POST") {
+    if (u.role !== "admin" && !permissions(JSON.parse(u.permissions)).upload) fail(403, "没有上传权限");
+    if (typeof b.active !== "boolean") fail(400, "上传活动状态无效");
+    const runId = b.runId === undefined ? undefined : text(b.runId, "上传运行标识", 120);
+    if (b.active) {
+      const result = await uploadDemand(env.DB, u.id, device, Date.now(), runId).run();
+      if (!result.meta.changes) fail(409, "本次上传已暂停，请重新开始");
+    } else if (runId !== undefined) await stopUploadDemand(env.DB, u.id, device, runId).run();
+    else await env.DB.prepare("DELETE FROM upload_demands WHERE deviceId=? AND userId=? AND runId=''").bind(device, u.id).run();
+    return json({ ok: true });
+  }
   if (path === "/api/me")
     return json({ user: publicUser(u), groups: await groupsFor(env, u) });
   if (path === "/api/logout" && method === "POST") {
@@ -579,8 +591,9 @@ async function handle(request: Request, env: Env) {
       settings: {
         ...defaults,
         ...(row ? JSON.parse(row.value) : {}),
+        allocation: "dynamic-device",
         retentionDays: 7,
-        perDevice: 5,
+        perDevice: 20,
         global: 20,
       },
       storage: {
@@ -901,36 +914,12 @@ async function handle(request: Request, env: Env) {
         fail(409, "文件状态不允许上传");
       const c = await storageConfig(env);
       if (!c) fail(503, "存储未配置");
-      await env.DB.batch([
-        env.DB.prepare(
-          "UPDATE files SET status='pending',error='上传授权已超时' WHERE status='uploading' AND id IN(SELECT fileId FROM leases WHERE expiresAt<=?)",
-        ).bind(Date.now()),
-        env.DB.prepare("DELETE FROM leases WHERE expiresAt<=?").bind(
-          Date.now(),
-        ),
-      ]);
-      const leaseId = crypto.randomUUID(),
-        expiresAt = Date.now() + 300000;
-      const lease = await env.DB.prepare(
-        `INSERT INTO leases(id,fileId,userId,deviceId,expiresAt) SELECT ?,?,?,?,? WHERE (SELECT COUNT(*) FROM leases WHERE expiresAt>?)<20 AND (SELECT COUNT(*) FROM leases WHERE userId=? AND expiresAt>?)<5 AND (SELECT COUNT(*) FROM leases WHERE deviceId=? AND expiresAt>?)<5 AND NOT EXISTS(SELECT 1 FROM leases WHERE fileId=?) AND EXISTS(SELECT 1 FROM files WHERE id=? AND status IN('pending','failed','uploading'))`,
-      )
-        .bind(
-          leaseId,
-          f.id,
-          u.id,
-          device,
-          expiresAt,
-          Date.now(),
-          u.id,
-          Date.now(),
-          device,
-          Date.now(),
-          f.id,
-          f.id,
-        )
-        .run();
+      const runId = b.runId === undefined ? undefined : text(b.runId, "上传运行标识", 120);
+      const reservation = reserveUpload(env.DB, f.id, u.id, device, Date.now(), runId);
+      const leaseId = reservation.id, expiresAt = reservation.expiresAt;
+      const lease = await reservation.run();
       if (!lease.meta.changes)
-        return json({ error: "上传并发已满，请稍后重试" }, 429, {
+        return json({ error: "正在等待公司上传名额，系统将按设备动态分配" }, 429, {
           "Retry-After": "2",
         });
       try {
@@ -1204,6 +1193,7 @@ export default {
         Date.now(),
       ),
       env.DB.prepare("DELETE FROM leases WHERE expiresAt<=?").bind(Date.now()),
+      pruneUploadDemands(env.DB),
       env.DB.prepare("DELETE FROM login_attempts WHERE resetAt<=?").bind(
         Date.now(),
       ),

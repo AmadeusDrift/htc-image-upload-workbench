@@ -216,10 +216,10 @@ describe("Worker integration", () => {
     const ids = f.body.files.map((x: any) => x.id);
     const results = await Promise.all(
       ids
-        .slice(0, 6)
+        .slice(0, 21)
         .map((id: string) => call("/api/files/" + id + "/lease", {})),
     );
-    expect(results.filter((x) => x.status === 200)).toHaveLength(5);
+    expect(results.filter((x) => x.status === 200)).toHaveLength(20);
     expect(results.filter((x) => x.status === 429)).toHaveLength(1);
     const first = results.find((x) => x.status === 200)!;
     const firstId = ids[results.indexOf(first)];
@@ -1167,7 +1167,7 @@ describe("Worker integration", () => {
     expect(deletions).toHaveLength(1);
     expect(Array.isArray(deletions[0])).toBe(true);
     expect(deletions[0]).toHaveLength(500);
-    expect(sizes).toEqual([...Array(10).fill(100), 3]);
+    expect(sizes).toEqual([...Array(10).fill(100), 4]);
     expect(
       (await db
         .prepare(
@@ -1205,12 +1205,14 @@ describe("Worker integration", () => {
       .run();
     const deleteCount = deletions.length,
       batchCount = sizes.length;
+    await db.prepare('INSERT INTO upload_demands(deviceId,userId,expiresAt) VALUES(?,?,?)').bind('cleanup', task.userId, 0).run();
     await worker.scheduled(
       {} as ScheduledController,
       { DB: trackedDB, BUCKET: trackedBucket } as Env,
     );
     expect(deletions).toHaveLength(deleteCount);
-    expect(sizes.slice(batchCount)).toEqual([3]);
+    expect(sizes.slice(batchCount)).toEqual([4]);
+    expect(await db.prepare("SELECT 1 FROM upload_demands WHERE deviceId='cleanup'").first()).toBeNull();
     expect(
       await db
         .prepare("SELECT 1 FROM sessions WHERE tokenHash=?")

@@ -1,4 +1,4 @@
-function createUploadGate(limit=5,slots=new Map(),timeoutMs=60000){
+function createUploadGate(limit=20,slots=new Map(),timeoutMs=60000){
  return {slots,async run(id,prepare,transfer){
   if(slots.has(id))throw Error('该文件正在上传');
   if(slots.size>=limit)throw Error('客户端并发上限为 '+limit);

@@ -21,7 +21,7 @@ async function startNativeWork(operation){updateController?.assertCanStart();try
 const service=new URL(config.apiBase);if(service.protocol!=='https:')throw Error('Service requires HTTPS');
 const uploadHost=config.uploadHost||'e4ae0f44249c105791d1e64969abc669.r2.cloudflarestorage.com';
 const types={'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.webp':'image/webp'};
-const handles=new Map(),requests=new Map();const uploadGate=createUploadGate(5,requests);let win,deviceId;
+const handles=new Map(),requests=new Map();const uploadGate=createUploadGate(20,requests);let win,deviceId;
 const manifestStore=createManifestStore(path.join(app.getPath('userData'),'upload-manifest.json'),handles);
 function sender(event){assertTrustedSender(event,win,trustedURL)}
 function handle(name,fn){ipcMain.handle(name,(event,...args)=>{sender(event);return fn(...args)})}
