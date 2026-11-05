@@ -2,7 +2,7 @@
 
 **htc传图工具台 / HTC 图片上传工作台**
 
-公司内部图片上传工具，包含 Windows Electron 客户端、React 网页界面与 Cloudflare Workers 服务端。源码版本 **1.1.3**（候选版）。
+公司内部图片上传工具，包含 Windows Electron 客户端、React 网页界面与 Cloudflare Workers 服务端。源码版本 **1.1.3**（2026-11-05 已发布）。
 
 ## 功能
 
