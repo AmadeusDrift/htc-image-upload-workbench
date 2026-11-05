@@ -10,6 +10,7 @@ import {
 import { storageConfig, presign } from "./storage";
 import { handleRelease } from "./releases";
 import { pruneUploadDemands, reserveUpload, stopUploadDemand, uploadDemand } from "./concurrency";
+import { operatorEntryEnabled, operatorEntryThrottled, operatorNameAllowed, operatorStatus } from "./operator-entry";
 type Permissions = {
   upload: boolean;
   view: boolean;
@@ -301,10 +302,29 @@ async function handle(request: Request, env: Env) {
         "SELECT id FROM users LIMIT 1",
       ).first()),
       storageReady: !!(await storageConfig(env)),
+      operatorEntryEnabled: operatorEntryEnabled(env),
       limits: { global: 20, perDevice: 20, allocation: "dynamic-device" },
-      version: "1.1.2",
+      version: "1.1.3",
     });
   const b = method === "POST" || method === "PATCH" ? await parse(request) : {};
+  if (path === "/api/operator-status" && method === "GET") {
+    if (!operatorEntryEnabled(env)) fail(404, "入口未启用");
+    return json(await operatorStatus(env.DB));
+  }
+  if (path === "/api/operator-entry" && method === "POST") {
+    if (!operatorEntryEnabled(env)) fail(404, "入口未启用");
+    const username = text(b.username, "用户名", 80),
+      device = text(b.deviceId, "设备", 120),
+      headerDevice = text(request.headers.get("X-Device-Id"), "设备", 120);
+    if (device !== headerDevice) fail(400, "设备标识不一致");
+    if (await operatorEntryThrottled(env.DB, request, device))
+      fail(429, "进入尝试过多，请一分钟后重试");
+    if (!operatorNameAllowed(username)) fail(403, "此操作员不可用");
+    const operator = await env.DB.prepare("SELECT * FROM users WHERE username=? AND role='employee' AND status='active'")
+      .bind(username).first<User>();
+    if (!operator) fail(403, "此操作员不可用");
+    return json(await session(env, operator, device));
+  }
   if (path === "/api/setup" && method === "POST") {
     if (await env.DB.prepare("SELECT id FROM users LIMIT 1").first())
       fail(409, "管理员已初始化");
@@ -391,6 +411,13 @@ async function handle(request: Request, env: Env) {
   if (!path.startsWith("/api/"))
     return new Response("Not found", { status: 404 });
   const { u, device, tokenHash } = await authenticate(request, env);
+  if (path === "/api/presence" && method === "GET")
+    return json({ ok: true });
+  if (path === "/api/presence/leave" && method === "POST") {
+    await env.DB.prepare("UPDATE sessions SET lastSeen=0 WHERE tokenHash=?")
+      .bind(tokenHash).run();
+    return json({ ok: true });
+  }
   if (path === "/api/uploads/activity" && method === "POST") {
     if (u.role !== "admin" && !permissions(JSON.parse(u.permissions)).upload) fail(403, "没有上传权限");
     if (typeof b.active !== "boolean") fail(400, "上传活动状态无效");

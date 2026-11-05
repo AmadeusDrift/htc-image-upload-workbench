@@ -20,7 +20,17 @@ export class UploadEngine {
  }
  async bindUser(userId:string){
   const binding=++this.ownerEpoch;await this.restoreReady;if(binding!==this.ownerEpoch||this.ownerId===userId)return;this.selectionEpoch++;await this.pause();if(binding!==this.ownerEpoch)return;
-  if(userId&&this.restored===undefined&&typeof window!=='undefined'&&window.desktop){
+  const desktop=typeof window!=='undefined'?window.desktop:undefined;
+  if(desktop?.loadUserManifest){
+   try{
+    // pause() is best effort for close/pause controls; switching owners requires
+    // a durable current checkpoint before native storage may replace it.
+    if(this.ownerId)await this.flushManifest();
+    if(binding!==this.ownerEpoch)return;
+    if(userId){const checkpoint=await bounded(()=>desktop.loadUserManifest!(userId),undefined,8000,'本地任务读取超时，请检查磁盘状态');if(binding!==this.ownerEpoch)return;this.restored=checkpoint}
+    else this.restored=undefined;
+   }catch(error){if(binding!==this.ownerEpoch)return;this.state.persistenceError='本地任务切换失败：'+String(error);this.emit(false,true);throw error}
+  }else if(userId&&this.restored===undefined&&desktop){
    try{const checkpoint=await bounded(()=>window.desktop!.loadManifest(),undefined,8000,'本地任务读取超时，请检查磁盘状态');if(binding!==this.ownerEpoch)return;this.restored=checkpoint}
    catch(error){if(binding!==this.ownerEpoch)return;this.restored=null;this.state.persistenceError=String(error)}
   }

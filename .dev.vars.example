@@ -1,5 +1,7 @@
 # Local placeholders only. Never overwrite production secrets with these values.
 SETUP_TOKEN=replace-with-a-local-setup-token
 CONFIG_KEY=replace-with-a-local-random-encryption-key
+# Explicit local opt-in for public alpha/beta/gamma/delta employee entry.
+OPERATOR_CARD_ENTRY_ENABLED=false
 
 RELEASE_PUBLISH_TOKEN=local-test-release-placeholder-only

@@ -17,7 +17,7 @@ export interface DesktopAPI {
  prepareImage(id:string,options:{enabled:boolean;quality:number}):Promise<NativeFile & {originalSize:number;compressed:boolean;compressionNote?:string}>;abortPreparation(id:string):Promise<boolean>;releasePrepared(ids:string[]):Promise<{released:number}>;
  hashFile(id:string):Promise<string>;upload(options:{fileId:string;url:string;headers:Record<string,string>}):Promise<void>;abortUpload(id:string):Promise<boolean>;
  onUploadProgress(callback:(progress:{fileId:string;loaded:number;total:number})=>void):()=>void;
- saveManifest(data:unknown):Promise<boolean>;loadManifest():Promise<any>;
+ saveManifest(data:unknown):Promise<boolean>;loadManifest():Promise<any>;loadUserManifest?(ownerId:string):Promise<any>;
  flushManifest():Promise<boolean>;setUploadActive(active:boolean):Promise<boolean>;
  onPrepareClose(callback:()=>Promise<void>):()=>void;
 }

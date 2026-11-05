@@ -9,7 +9,8 @@ const trustedIndex=path.join(__dirname,'../dist/index.html');
 const trustedURL=pathToFileURL(trustedIndex).href;
 const {createUploadGate}=require('./native-upload.cjs');
 const {installTitlebar}=require('./titlebar.cjs');
-const {createManifestStore,createCloseCoordinator}=require('./manifest.cjs');
+const {createCloseCoordinator}=require('./manifest.cjs');
+const {createProfileManifestStore}=require('./profile-manifest.cjs');
 const {createHashReader}=require('./hash.cjs');
 const {createImagePreparer}=require('./compression.cjs');
 const {createUpdaterController}=require('./updater.cjs');
@@ -22,7 +23,7 @@ const service=new URL(config.apiBase);if(service.protocol!=='https:')throw Error
 const uploadHost=config.uploadHost||'e4ae0f44249c105791d1e64969abc669.r2.cloudflarestorage.com';
 const types={'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.webp':'image/webp'};
 const handles=new Map(),requests=new Map();const uploadGate=createUploadGate(20,requests);let win,deviceId;
-const manifestStore=createManifestStore(path.join(app.getPath('userData'),'upload-manifest.json'),handles);
+const manifestStore=createProfileManifestStore(path.join(app.getPath('userData'),'upload-manifest.json'),handles);
 function sender(event){assertTrustedSender(event,win,trustedURL)}
 function handle(name,fn){ipcMain.handle(name,(event,...args)=>{sender(event);return fn(...args)})}
 async function scan(paths,recurse=true){const files=[];const visit=async(p,root,depth=0)=>{let s;try{s=await fsp.lstat(p)}catch{return}if(s.isSymbolicLink())return;if(s.isDirectory()){if(depth>0&&!recurse)return;for(const entry of await fsp.readdir(p))await visit(path.join(p,entry),root,depth+1);return}const type=types[path.extname(p).toLowerCase()];if(!s.isFile()||!type||s.size<1||s.size>50*1024*1024)return;if(files.length>=20000)throw Error('单次最多选择 20000 张图片');const id=crypto.randomUUID();const name=path.basename(p),relativePath=path.relative(root,p).split(path.sep).join('/');handles.set(id,{path:p,size:s.size,mtimeMs:s.mtimeMs,name,relativePath,contentType:type});files.push({id,name,relativePath,size:s.size,contentType:type})};for(const p of paths){if(typeof p!=='string'||!path.isAbsolute(p))throw Error('Invalid selection');await visit(p,path.dirname(p))}return files}
@@ -55,7 +56,9 @@ startDesktop({app,log:diagnostics.log,fail:diagnostics.fail,getWindow:()=>win,cr
  handle('manifest-save',data=>manifestStore.save(data));
  handle('manifest-flush',()=>manifestStore.flush());
  handle('upload-active',active=>{if(typeof active!=='boolean')throw Error('Invalid active flag');if(active)updateController?.assertCanStart();uploadActive=active;updateController?.refreshBusy();return true});
- handle('manifest-load',async()=>{const data=await manifestStore.load();if(!data)return null;const itemsByNative=new Map(data.items.filter(item=>item.nativeId).map(item=>[item.nativeId,item]));for(const source of data.sources){const item=itemsByNative.get(source.id)||{};handles.set(source.id,{path:source.path,size:source.size,mtimeMs:source.mtimeMs,preparedImage:source.preparedImage===true,name:item.name,relativePath:item.relativePath,contentType:item.contentType,originalSize:item.originalSize,compressed:item.compressed,compressionNote:item.compressionNote})}if(data.recoveryWarning)diagnostics.log('manifest-recovered',data.recoveryWarning);const {sources,...visible}=data;return visible});
+ function visibleManifest(data){if(!data)return null;const itemsByNative=new Map(data.items.filter(item=>item.nativeId).map(item=>[item.nativeId,item]));for(const source of data.sources){const item=itemsByNative.get(source.id)||{};handles.set(source.id,{path:source.path,size:source.size,mtimeMs:source.mtimeMs,preparedImage:source.preparedImage===true,name:item.name,relativePath:item.relativePath,contentType:item.contentType,originalSize:item.originalSize,compressed:item.compressed,compressionNote:item.compressionNote})}if(data.recoveryWarning)diagnostics.log('manifest-recovered',data.recoveryWarning);const {sources,...visible}=data;return visible}
+ handle('manifest-load',async()=>visibleManifest(await manifestStore.load()));
+ handle('manifest-load-user',async ownerId=>visibleManifest(await manifestStore.loadUserManifest(ownerId)));
  handle('ready-to-close',data=>{if(!pendingClose||!data||data.id!==pendingClose.id)return false;const pending=pendingClose;pendingClose=undefined;clearTimeout(pending.timer);if(data.error)pending.reject(Error(String(data.error).slice(0,1000)));else pending.resolve();return true});
  function prepareRendererClose(){
   if(!rendererAvailable||win.webContents.isDestroyed())return Promise.reject(Error('界面进程已退出，仅能保留主进程已收到的最近进度；尚未提交的界面状态无法恢复。'));

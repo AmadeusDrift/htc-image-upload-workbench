@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('desktop',Object.freeze({
  abortUpload:id=>ipcRenderer.invoke('abort',id),
  saveManifest:data=>ipcRenderer.invoke('manifest-save',data),
  loadManifest:()=>ipcRenderer.invoke('manifest-load'),
+ loadUserManifest:ownerId=>ipcRenderer.invoke('manifest-load-user',ownerId),
  flushManifest:()=>ipcRenderer.invoke('manifest-flush'),
  setUploadActive:active=>ipcRenderer.invoke('upload-active',active),
  onPrepareClose:callback=>{prepareCloseHandler=callback;return()=>{if(prepareCloseHandler===callback)prepareCloseHandler=undefined}},
