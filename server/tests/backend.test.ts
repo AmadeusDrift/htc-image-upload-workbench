@@ -1087,7 +1087,34 @@ describe("Worker integration", () => {
       ).status,
     ).toBe(403);
   });
-  it("expires at most500 files with one R2 batch and bounded D1 batches, retaining failure retry state", async () => {
+  it("starts seven-day retention at confirmation even when a registered row was about to expire", async () => {
+    const db = await mf.getD1Database("DB");
+    const bucket = await mf.getR2Bucket("BUCKET");
+    await db.prepare("DELETE FROM leases").run();
+    await db.prepare("DELETE FROM upload_demands").run();
+    const task = (await call("/api/tasks",{groupId,name:"Retention fixture"})).body.task;
+    const row = (await call("/api/tasks/"+task.id+"/files",{files:[{
+      clientId:"retention-test",name:"retention.png",relativePath:"retention.png",
+      size:3,contentType:"image/png",sha256:"e".repeat(64),
+    }]})).body.files[0];
+    const lease = (await call("/api/files/"+row.id+"/lease",{})).body;
+    expect(lease.leaseId).toBeTruthy();
+    const key = "images/"+row.id;
+    await bucket.put(key,"abc",{httpMetadata:{contentType:"image/png"}});
+    await db.prepare("UPDATE files SET createdAt=?,expiresAt=? WHERE id=?")
+      .bind("2000-01-01T00:00:00.000Z","2000-01-08T00:00:00.000Z",row.id).run();
+    await worker.scheduled({} as ScheduledController,{DB:db,BUCKET:bucket} as Env);
+    expect(await bucket.head(key)).not.toBeNull();
+    const done = await call("/api/files/"+row.id+"/complete",{leaseId:lease.leaseId});
+    expect(done.status).toBe(200);
+    const stored = await db.prepare("SELECT completedAt,expiresAt FROM files WHERE id=?")
+      .bind(row.id).first<{completedAt:string;expiresAt:string}>();
+    expect(Date.parse(stored!.expiresAt)-Date.parse(stored!.completedAt)).toBe(7*86400000);
+    expect(done.body.file.expiresAt).toBe(stored!.expiresAt);
+    const replay = await call("/api/files/"+row.id+"/complete",{leaseId:lease.leaseId});
+    expect(replay.body.file.expiresAt).toBe(stored!.expiresAt);
+  });
+  it("cleans a four-digit expiry backlog in bounded R2 batches, retaining failure retry state", async () => {
     const db = await mf.getD1Database("DB"),
       bucket = await mf.getR2Bucket("BUCKET");
     await db
@@ -1099,7 +1126,7 @@ describe("Worker integration", () => {
     ).body.task;
     await db
       .prepare(
-        `WITH RECURSIVE numbers(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM numbers WHERE n<500) INSERT INTO files(id,clientId,taskId,groupId,userId,name,relativePath,size,contentType,sha256,objectKey,status,createdAt,expiresAt) SELECT 'expiry-'||printf('%04d',n),'expiry-'||n,?,?,?,'expiry.png','expiry.png',3,'image/png',?,'images/expiry-'||printf('%04d',n),'success',?,'2000-01-01T00:00:00.000Z' FROM numbers`,
+        `WITH RECURSIVE numbers(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM numbers WHERE n<1000) INSERT INTO files(id,clientId,taskId,groupId,userId,name,relativePath,size,contentType,sha256,objectKey,status,createdAt,expiresAt) SELECT 'expiry-'||printf('%04d',n),'expiry-'||n,?,?,?,'expiry.png','expiry.png',3,'image/png',?,'images/expiry-'||printf('%04d',n),'success',?,'2000-01-01T00:00:00.000Z' FROM numbers`,
       )
       .bind(
         task.id,
@@ -1110,7 +1137,7 @@ describe("Worker integration", () => {
       )
       .run();
     await bucket.put("images/expiry-0000", "abc");
-    await bucket.put("images/expiry-0500", "abc");
+    await bucket.put("images/expiry-1000", "abc");
     const sizes: number[] = [],
       deletions: (string | string[])[] = [];
     const trackedDB = new Proxy(db, {
@@ -1147,7 +1174,7 @@ describe("Worker integration", () => {
         )
         .bind(task.id)
         .first<{ n: number }>())!.n,
-    ).toBe(501);
+    ).toBe(1001);
     expect(sizes).toEqual([]);
     const trackedBucket = new Proxy(bucket, {
       get(target, key) {
@@ -1164,10 +1191,8 @@ describe("Worker integration", () => {
       {} as ScheduledController,
       { DB: trackedDB, BUCKET: trackedBucket } as Env,
     );
-    expect(deletions).toHaveLength(1);
-    expect(Array.isArray(deletions[0])).toBe(true);
-    expect(deletions[0]).toHaveLength(500);
-    expect(sizes).toEqual([...Array(10).fill(100), 4]);
+    expect(deletions.map(keys => keys.length)).toEqual([1000, 1]);
+    expect(sizes).toEqual([2, 2, 4]);
     expect(
       (await db
         .prepare(
@@ -1175,22 +1200,9 @@ describe("Worker integration", () => {
         )
         .bind(task.id)
         .first<{ n: number }>())!.n,
-    ).toBe(500);
+    ).toBe(1001);
     expect(await bucket.head("images/expiry-0000")).toBeNull();
-    expect(await bucket.head("images/expiry-0500")).not.toBeNull();
-    await worker.scheduled(
-      {} as ScheduledController,
-      { DB: trackedDB, BUCKET: trackedBucket } as Env,
-    );
-    expect(
-      (await db
-        .prepare(
-          "SELECT COUNT(*) n FROM files WHERE taskId=? AND status='expired'",
-        )
-        .bind(task.id)
-        .first<{ n: number }>())!.n,
-    ).toBe(501);
-    expect(await bucket.head("images/expiry-0500")).toBeNull();
+    expect(await bucket.head("images/expiry-1000")).toBeNull();
     await db
       .prepare("INSERT INTO sessions VALUES(?,?,?,?,?)")
       .bind("cleanup-expired-session", task.userId, "cleanup", 0, 0)
@@ -1200,7 +1212,7 @@ describe("Worker integration", () => {
       .bind("cleanup-expired-attempt", 1, 0)
       .run();
     await db
-      .prepare("INSERT INTO leases VALUES(?,?,?,?,?)")
+      .prepare("INSERT INTO leases(id,fileId,userId,deviceId,expiresAt) VALUES(?,?,?,?,?)")
       .bind("cleanup-expired-lease", "expiry-0500", task.userId, "cleanup", 0)
       .run();
     const deleteCount = deletions.length,

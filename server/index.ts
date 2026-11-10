@@ -9,7 +9,8 @@ import {
 } from "./auth";
 import { storageConfig, presign } from "./storage";
 import { handleRelease } from "./releases";
-import { pruneUploadDemands, reserveUpload, stopUploadDemand, uploadDemand } from "./concurrency";
+import { exportSnapshotPage } from "./export-snapshot";
+import { GLOBAL_UPLOAD_LIMIT, pruneUploadDemands, reserveUpload, reserveUploadBatch, stopUploadDemand, uploadDemand } from "./concurrency";
 import { operatorEntryEnabled, operatorEntryThrottled, operatorNameAllowed, operatorStatus } from "./operator-entry";
 type Permissions = {
   upload: boolean;
@@ -84,6 +85,12 @@ const json = (
     },
   });
 const now = () => new Date().toISOString();
+const DAY_MS = 86400000;
+const IMAGE_RETENTION_MS = 7 * DAY_MS;
+const UNFINISHED_RETENTION_MS = 30 * DAY_MS;
+const MAX_CONFIRM_OBJECT_AGE_MS = DAY_MS / 2;
+const EXPIRY_BATCH_SIZE = 1000;
+const EXPIRY_BATCHES_PER_SWEEP = 8;
 function text(value: unknown, label: string, max = 200): string {
   if (
     typeof value !== "string" ||
@@ -303,8 +310,9 @@ async function handle(request: Request, env: Env) {
       ).first()),
       storageReady: !!(await storageConfig(env)),
       operatorEntryEnabled: operatorEntryEnabled(env),
+      batchUpload: true,
       limits: { global: 20, perDevice: 20, allocation: "dynamic-device" },
-      version: "1.1.3",
+      version: "1.1.4",
     });
   const b = method === "POST" || method === "PATCH" ? await parse(request) : {};
   if (path === "/api/operator-status" && method === "GET") {
@@ -423,9 +431,12 @@ async function handle(request: Request, env: Env) {
     if (typeof b.active !== "boolean") fail(400, "上传活动状态无效");
     const runId = b.runId === undefined ? undefined : text(b.runId, "上传运行标识", 120);
     if (b.active) {
-      const result = await uploadDemand(env.DB, u.id, device, Date.now(), runId).run();
+      const demand = b.demand;
+      if (demand !== undefined && (!runId || typeof demand !== "number" || !Number.isInteger(demand) || demand < 0 || demand > GLOBAL_UPLOAD_LIMIT))
+        fail(400, "上传需求无效");
+      const result = await uploadDemand(env.DB, u.id, device, Date.now(), runId, demand).run();
       if (!result.meta.changes) fail(409, "本次上传已暂停，请重新开始");
-    } else if (runId !== undefined) await stopUploadDemand(env.DB, u.id, device, runId).run();
+    } else if (runId !== undefined) await stopUploadDemand(env.DB, u.id, device, runId);
     else await env.DB.prepare("DELETE FROM upload_demands WHERE deviceId=? AND userId=? AND runId=''").bind(device, u.id).run();
     return json({ ok: true });
   }
@@ -790,7 +801,7 @@ async function handle(request: Request, env: Env) {
         sha256: String(value.sha256),
         objectKey: `images/${id}`,
         createdAt: now(),
-        expiresAt: new Date(Date.now() + 7 * 86400000).toISOString(),
+        expiresAt: new Date(Date.now() + UNFINISHED_RETENTION_MS).toISOString(),
       };
     });
     await env.DB.batch(
@@ -919,6 +930,51 @@ async function handle(request: Request, env: Env) {
       total: tasks.length,
     });
   }
+  const batchLease = path.match(/^\/api\/tasks\/([^/]+)\/upload-leases$/);
+  if (batchLease && method === "POST") {
+    const task = await env.DB.prepare("SELECT id,userId,groupId FROM tasks WHERE id=?")
+      .bind(batchLease[1]).first<{id:string;userId:string;groupId:string}>();
+    if (!task) return fail(404, "任务不存在");
+    await allow(env, u, task.groupId, "upload");
+    if (task.userId !== u.id && u.role !== "admin") fail(403, "只能上传自己的文件");
+    const runId = text(b.runId, "上传运行标识", 120);
+    const demand = b.demand;
+    if (typeof demand !== "number" || !Number.isInteger(demand) || demand < 0 || demand > GLOBAL_UPLOAD_LIMIT)
+      return fail(400, "上传需求无效");
+    if (!Array.isArray(b.fileIds) || b.fileIds.length > GLOBAL_UPLOAD_LIMIT || b.fileIds.length > demand)
+      fail(400, "一次最多申请 20 张图片的上传名额");
+    const fileIds = [...new Set<string>((b.fileIds as unknown[]).map(id => text(id, "文件标识", 120)))];
+    const storage = fileIds.length ? await storageConfig(env) : null;
+    if (fileIds.length && !storage) fail(503, "存储未配置");
+    const candidates = fileIds.length ? (await env.DB.prepare(
+      "SELECT f.* FROM json_each(?) j JOIN files f ON f.id=j.value WHERE f.taskId=?"
+    ).bind(JSON.stringify(fileIds), task.id).all<FileRow>()).results : [];
+    const byId = new Map(candidates.map(f => [f.id,f]));
+    const timestamp = now();
+    const eligible = fileIds.filter(id => {
+      const file = byId.get(id);
+      return file && file.expiresAt > timestamp && ["pending","failed","uploading"].includes(file.status);
+    });
+    const { slots, grants } = await reserveUploadBatch(env.DB, {
+      fileIds: eligible, demand, taskId: task.id, userId: u.id, deviceId: device, runId,
+    });
+    if (!slots.active) fail(409, "本次上传已暂停，请重新开始");
+    const eligibleIds = new Set(eligible);
+    const unavailable = fileIds.filter(id => !eligibleIds.has(id)).map(fileId => {
+      const file = byId.get(fileId);
+      return {fileId, file: file ? fileView(file, url.origin) : null};
+    });
+    return json({
+      quota: slots.quota, used: slots.used, globalUsed: slots.globalUsed,
+      globalLimit: GLOBAL_UPLOAD_LIMIT, uploadingDevices: slots.uploadingDevices, unavailable,
+      grants: await Promise.all(grants.map(async grant => ({
+        fileId: grant.fileId, leaseId: grant.leaseId,
+        ...(await presign(storage!, grant.objectKey, grant.contentType,
+          Math.max(1, Math.floor((grant.expiresAt - Date.now()) / 1000)))),
+        expiresAt: new Date(grant.expiresAt).toISOString(),
+      }))),
+    });
+  }
   const action = path.match(
     /^\/api\/files\/([^/]+)\/(lease|complete|fail|release)$/,
   );
@@ -983,10 +1039,15 @@ async function handle(request: Request, env: Env) {
         object.httpMetadata?.contentType !== f.contentType
       )
         fail(409, "R2文件大小或类型未匹配，尚未确认成功");
+      const confirmation = Date.now();
+      // The bucket's eight-day backstop starts at the object write. Old orphaned
+      // objects need a fresh PUT before they can start a full seven-day link.
+      if (object!.uploaded.getTime() < confirmation - MAX_CONFIRM_OBJECT_AGE_MS)
+        fail(409, "云端临时文件已超时，请重新上传");
       const completed = await env.DB.batch([
         env.DB.prepare(
-          "UPDATE files SET status='success',error=NULL,completedAt=? WHERE id=? AND status='uploading' AND EXISTS(SELECT 1 FROM leases WHERE id=? AND expiresAt>?)",
-        ).bind(now(), f.id, lease!.id, Date.now()),
+          "UPDATE files SET status='success',error=NULL,completedAt=?,expiresAt=? WHERE id=? AND status='uploading' AND EXISTS(SELECT 1 FROM leases WHERE id=? AND expiresAt>?)",
+        ).bind(new Date(confirmation).toISOString(), new Date(confirmation + IMAGE_RETENTION_MS).toISOString(), f.id, lease!.id, confirmation),
         env.DB.prepare("DELETE FROM leases WHERE id=?").bind(lease!.id),
       ]);
       if (!completed[0].meta.changes) fail(409, "文件或授权状态已改变");
@@ -1036,6 +1097,9 @@ async function handle(request: Request, env: Env) {
         where += ` AND f.${key}=?`;
         args.push(url.searchParams.get(key));
       }
+    if (exportMode && (url.searchParams.has("snapshot") || url.searchParams.has("verify"))) {
+      return json(await exportSnapshotPage({ db: env.DB, key: env.CONFIG_KEY, actor: u, url, page: cursorPage(url), where, args, fail }));
+    }
     if (exportMode) {
       where += " AND f.status='success' AND f.expiresAt>?";
       args.push(now());
@@ -1192,28 +1256,24 @@ export default {
     }
   },
   async scheduled(_event: ScheduledController, env: Env) {
-    const rows = await env.DB.prepare(
-      "SELECT id,objectKey FROM files WHERE expiresAt<=? AND status NOT IN('deleted','expired') LIMIT 500",
-    )
-      .bind(now())
-      .all<{ id: string; objectKey: string }>();
-    if (rows.results.length) {
-      // R2 accepts at most 1000 keys per delete; this query selects at most 500.
-      // Confirm object deletion before changing any expiry records so a failed
-      // R2 operation remains eligible for an idempotent retry next time.
-      await env.BUCKET.delete(rows.results.map((file) => file.objectKey));
-      for (let start = 0; start < rows.results.length; start += 50) {
-        await env.DB.batch(
-          rows.results
-            .slice(start, start + 50)
-            .flatMap((file) => [
-              env.DB.prepare(
-                "UPDATE files SET status='expired' WHERE id=? AND status<>'deleted'",
-              ).bind(file.id),
-              env.DB.prepare("DELETE FROM leases WHERE fileId=?").bind(file.id),
-            ]),
-        );
-      }
+    const time = Date.now(), cutoff = new Date(time).toISOString();
+    for (let batch = 0; batch < EXPIRY_BATCHES_PER_SWEEP; batch++) {
+      const { results } = await env.DB.prepare(
+        "SELECT id,objectKey FROM files WHERE expiresAt<=? AND status NOT IN('deleted','expired') AND NOT EXISTS(SELECT 1 FROM leases WHERE fileId=files.id AND expiresAt>?) ORDER BY expiresAt,id LIMIT ?",
+      ).bind(cutoff,time,EXPIRY_BATCH_SIZE).all<{id:string;objectKey:string}>();
+      if (!results.length) break;
+      // Active leases protect confirmations. Old links are already unavailable.
+      // Leave the rows eligible for retry if a bucket delete fails.
+      await env.BUCKET.delete(results.map(file=>file.objectKey));
+      const ids = JSON.stringify(results.map(file=>file.id));
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE files SET status='expired' WHERE id IN(SELECT value FROM json_each(?)) AND expiresAt<=? AND status NOT IN('deleted','expired')",
+        ).bind(ids,cutoff),
+        env.DB.prepare("DELETE FROM leases WHERE fileId IN(SELECT value FROM json_each(?)) AND expiresAt<=?")
+          .bind(ids,time),
+      ]);
+      if (results.length < EXPIRY_BATCH_SIZE) break;
     }
     await env.DB.batch([
       env.DB.prepare("DELETE FROM sessions WHERE expiresAt<=?").bind(

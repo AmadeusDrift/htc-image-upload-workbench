@@ -3,6 +3,7 @@ export interface UpdateState {
  status:'idle'|'checking'|'available'|'downloading'|'ready'|'error'|'unsupported'|'installing';
  currentVersion:string;version?:string;percent?:number;error?:string;busy:boolean;
 }
+export type NativeUploadResult={ok:true}|{ok:false;error:{kind:string;message:string;status?:number;retryAfter?:number}};
 export interface DesktopAPI {
  getUpdateState?():Promise<UpdateState>;
  checkForUpdates?():Promise<UpdateState>;
@@ -15,17 +16,10 @@ export interface DesktopAPI {
  getConfig():Promise<{apiBase:string;deviceId:string}>;
  chooseFiles():Promise<NativeFile[]>;chooseFolder(recurse?:boolean):Promise<NativeFile[]>;resolveDropped(files:File[],recurse?:boolean):Promise<NativeFile[]>;
  prepareImage(id:string,options:{enabled:boolean;quality:number}):Promise<NativeFile & {originalSize:number;compressed:boolean;compressionNote?:string}>;abortPreparation(id:string):Promise<boolean>;releasePrepared(ids:string[]):Promise<{released:number}>;
- hashFile(id:string):Promise<string>;upload(options:{fileId:string;url:string;headers:Record<string,string>}):Promise<void>;abortUpload(id:string):Promise<boolean>;
+ hashFile(id:string):Promise<string>;abortHash?(id:string):Promise<boolean>;upload(options:{fileId:string;url:string;headers:Record<string,string>;deadlineAt?:number}):Promise<void|NativeUploadResult>;abortUpload(id:string):Promise<boolean>;
  onUploadProgress(callback:(progress:{fileId:string;loaded:number;total:number})=>void):()=>void;
- saveManifest(data:unknown):Promise<boolean>;loadManifest():Promise<any>;loadUserManifest?(ownerId:string):Promise<any>;
+ saveManifest(data:unknown):Promise<boolean>;saveManifestPatch?(data:unknown):Promise<number>;loadManifest():Promise<any>;loadUserManifest?(ownerId:string):Promise<any>;
  flushManifest():Promise<boolean>;setUploadActive(active:boolean):Promise<boolean>;
  onPrepareClose(callback:()=>Promise<void>):()=>void;
 }
 declare global {interface Window {desktop?:DesktopAPI}}
-
-
-
-
-
-
-

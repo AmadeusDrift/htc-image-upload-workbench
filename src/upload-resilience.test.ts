@@ -23,3 +23,67 @@ it('ignores a previous employee checkpoint response after a newer binding comple
 it('recovers a lost registration response by client id without registering or uploading twice',async()=>{let registrations=0,puts=0;let registered:any[]=[];desktop.upload=async()=>{puts++};const original=fetch;vi.stubGlobal('fetch',async(input:any,options:any)=>{const pathname=new URL(String(input)).pathname;if(pathname==='/api/tasks/task/files'){registrations++;registered=JSON.parse(options.body).files.map((f:any)=>({...f,id:'remote-'+f.clientId,status:'pending'}));throw Error('registration response lost')}if(pathname==='/api/tasks/task')return new Response(JSON.stringify({files:registered}));return original(input,options)});const e=new UploadEngine(()=>{});e.setOptions({retries:0});await e.addDesktopFiles();await e.start('group');expect(e.state.status).toBe('error');await e.start('group');expect(e.state.items[0].status).toBe('success');expect(registrations).toBe(1);expect(puts).toBe(1)});
 it('retry-failed only uploads failed rows and leaves paused pending rows for resume',async()=>{const seen:string[]=[];desktop.upload=async({fileId}:any)=>{seen.push(fileId)};const e=new UploadEngine(()=>{});e.state={status:'paused',taskId:'task',groupId:'group',items:[{...file,id:'failed',nativeId:'failed-source',fileId:'failed-remote',status:'failed',progress:0},{...file,id:'waiting',nativeId:'waiting-source',fileId:'waiting-remote',status:'pending',progress:0}]};const original=fetch;vi.stubGlobal('fetch',async(input:any,options:any)=>{if(new URL(String(input)).pathname==='/api/tasks/task')return new Response(JSON.stringify({files:[{id:'failed-remote',clientId:'failed',status:'failed'},{id:'waiting-remote',clientId:'waiting',status:'pending'}]}));return original(input,options)});await e.retryFailed();expect(seen).toEqual(['failed-source']);expect(e.state.items[1].status).toBe('pending');expect(e.state.status).toBe('paused')});
 
+it('lets an ongoing native PUT finish after sixty seconds within its grant budget',async()=>{
+ vi.useFakeTimers();
+ desktop.upload=()=>new Promise(resolve=>setTimeout(resolve,65000));
+ const e=new UploadEngine(()=>{});e.setOptions({retries:0});
+ await e.addDesktopFiles();const running=e.start('group');
+ await vi.advanceTimersByTimeAsync(65000);await running;
+ expect(e.state.items[0].status).toBe('success');
+});
+it.each([{kind:'auth',status:403,attempts:1},{kind:'signature-expired',status:403,attempts:2},{kind:'http',status:429,attempts:2}])('classifies a structured storage $kind failure',async({kind,status,attempts})=>{
+ vi.useFakeTimers();
+ desktop.upload=vi.fn(async()=>({ok:false,error:{kind,status,message:'storage rejected',retryAfter:2}}));
+ if(kind==='http')desktop.upload.mockResolvedValueOnce({ok:false,error:{kind,status,message:'storage busy',retryAfter:2}}).mockResolvedValue({ok:true});
+ const e=new UploadEngine(()=>{});e.setOptions({retries:1});
+ await e.addDesktopFiles();const running=e.start('group');
+ if(kind==='http'){await vi.advanceTimersByTimeAsync(1999);expect(desktop.upload).toHaveBeenCalledTimes(1)}
+ await vi.advanceTimersByTimeAsync(5000);await running;
+ expect(desktop.upload).toHaveBeenCalledTimes(attempts);
+ expect(e.state.items[0].status).toBe(kind==='http'?'success':'failed');
+});
+it('pauses native hashing without invoking the upload cancellation endpoint',async()=>{
+ desktop.hashFile=vi.fn(()=>new Promise(()=>{}));
+ desktop.abortHash=vi.fn(async()=>true);
+ desktop.abortUpload=vi.fn(async()=>true);
+ const e=new UploadEngine(()=>{});await e.addDesktopFiles();const running=e.start('group');
+ await vi.waitFor(()=>expect(desktop.hashFile).toHaveBeenCalledOnce());
+ await e.pause();await running;
+ expect(desktop.abortHash).toHaveBeenCalledWith('source');
+ expect(desktop.abortUpload).not.toHaveBeenCalled();
+ expect(e.state.items[0].status).toBe('pending');
+});
+it('keeps browser PUT alive beyond sixty seconds when upload bytes keep moving',async()=>{
+ vi.useFakeTimers();
+ vi.stubGlobal('window',{});
+ let wire:any;
+ class Xhr {
+  upload:any={};
+  timeout=0;
+  status=200;
+  onload?:()=>void;
+  ontimeout?:()=>void;
+  onabort?:()=>void;
+  open(){}
+  setRequestHeader(){}
+  send(){wire=this;if(this.timeout)setTimeout(()=>this.ontimeout?.(),this.timeout)}
+  abort(){this.onabort?.()}
+ }
+ vi.stubGlobal('XMLHttpRequest',Xhr);
+ const e=new UploadEngine(()=>{},{apiBase:'https://service.test',deviceId:'browser',getToken:()=> 'token'});
+ e.setOptions({retries:0,notify:false});
+ e.addBrowserFiles([new File(['image'],'browser.png',{type:'image/png'})]);
+ e.state.items[0].sha256='a'.repeat(64);
+ const running=e.start('group');
+ await vi.advanceTimersByTimeAsync(1000);
+ expect(wire).toBeDefined();
+ wire.upload.onprogress({loaded:1,total:5,lengthComputable:true});
+ for(const loaded of [2,3,4]){
+  await vi.advanceTimersByTimeAsync(21000);
+  wire.upload.onprogress({loaded,total:5,lengthComputable:true});
+ }
+ wire.onload();
+ await running;
+ expect(e.state.items[0].status).toBe('success');
+ e.clear();
+});

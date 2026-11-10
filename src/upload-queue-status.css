@@ -1,0 +1,41 @@
+.queue-live {
+  margin: 0 18px;
+  padding: 12px 0;
+  border-top: 1px solid #e5edf9;
+  color: #45638b;
+  font-size: 13px;
+}
+
+.queue-live-main, .queue-live-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 18px;
+}
+
+.queue-live-main b, .queue-live-state { color: #123361; }
+.queue-live-main b { font-variant-numeric: tabular-nums; }
+
+.queue-live-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.queue-live-state i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #91a4bf;
+}
+
+.queue-live-state i[data-active="true"] { background: #2a65f4; }
+
+.queue-live-meta {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.queue-live-meta summary { cursor: pointer; color: #275ebc; }
+.queue-live-meta details[open] { display: inline-flex; }
+.queue-live-meta details span { margin-inline-start: 8px; }

@@ -142,10 +142,11 @@ describe('main process update integration', () => {
    './startup.cjs': { installDiagnostics: () => ({ log: vi.fn(), fail: vi.fn() }), loadDeviceId: async () => 'device', startDesktop: ({ createWindow }: any) => { start = createWindow(); } },
    './security.cjs': { assertTrustedSender: guard }, './titlebar.cjs': { installTitlebar: vi.fn() },
    './manifest.cjs': { createManifestStore: () => ({ flush }), createCloseCoordinator: () => ({ approved: false, request: closeRequest }) },
-   './profile-manifest.cjs': { createProfileManifestStore: () => ({ flush }) },
+   './checkpoint.cjs': { createLocalCheckpoint: () => ({ flush }) },
+   './upload-policy.mjs': require('../electron/upload-policy.mjs'),
    './hash.cjs': { createHashReader: () => ({ jobs, hash: vi.fn(async () => 'hash') }) },
    './compression.cjs': { createImagePreparer: () => ({ jobs: preparationJobs, drain: async () => {} }) },
-   './updater.cjs': require('../electron/updater.cjs'), './native-upload.cjs': { createUploadGate: (limit: number, slots: Map<any, any>) => { nativeSlots = slots; return require('../electron/native-upload.cjs').createUploadGate(limit, slots); } },
+   './updater.cjs': require('../electron/updater.cjs'), './native-upload.cjs': { ...require('../electron/native-upload.cjs'), createUploadGate: (limit: number, slots: Map<any, any>) => { nativeSlots = slots; return require('../electron/native-upload.cjs').createUploadGate(limit, slots); } },
    '../server.json': { apiBase: 'https://example.com' }, 'electron-updater': { autoUpdater: updater },
   };
   runInNewContext(readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8'), { require: (name: string) => mocks[name] || require(name), __dirname: 'C:/app/electron', process: { platform: 'win32' }, setTimeout, clearTimeout, setInterval, clearInterval, URL });

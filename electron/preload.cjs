@@ -17,12 +17,14 @@ contextBridge.exposeInMainWorld('desktop',Object.freeze({
  chooseFolder:recurse=>ipcRenderer.invoke('choose-folder',recurse),
  resolveDropped:(files,recurse)=>ipcRenderer.invoke('dropped',Array.from(files).map(f=>webUtils.getPathForFile(f)).filter(Boolean),recurse),
  hashFile:id=>ipcRenderer.invoke('hash',id),
+ abortHash:id=>ipcRenderer.invoke('abort-hash',id),
  prepareImage:(id,options)=>ipcRenderer.invoke('prepare-image',id,options),
  abortPreparation:id=>ipcRenderer.invoke('abort-preparation',id),
  releasePrepared:ids=>ipcRenderer.invoke('release-prepared',ids),
  upload:options=>ipcRenderer.invoke('upload',options),
  abortUpload:id=>ipcRenderer.invoke('abort',id),
  saveManifest:data=>ipcRenderer.invoke('manifest-save',data),
+ saveManifestPatch:data=>ipcRenderer.invoke('manifest-save-patch',data),
  loadManifest:()=>ipcRenderer.invoke('manifest-load'),
  loadUserManifest:ownerId=>ipcRenderer.invoke('manifest-load-user',ownerId),
  flushManifest:()=>ipcRenderer.invoke('manifest-flush'),
@@ -30,10 +32,3 @@ contextBridge.exposeInMainWorld('desktop',Object.freeze({
  onPrepareClose:callback=>{prepareCloseHandler=callback;return()=>{if(prepareCloseHandler===callback)prepareCloseHandler=undefined}},
  onUploadProgress:callback=>{const listener=(_event,value)=>callback(value);ipcRenderer.on('upload-progress',listener);return()=>ipcRenderer.removeListener('upload-progress',listener)}
 }));
-
-
-
-
-
-
-

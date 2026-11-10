@@ -17,11 +17,12 @@ export async function presign(
   config: StorageConfig,
   key: string,
   contentType: string,
+  expiresIn = 300,
 ) {
   const url = new URL(
     `${config.endpoint}/${encodeURIComponent(config.bucket)}/${key.split("/").map(encodeURIComponent).join("/")}`,
   );
-  url.searchParams.set("X-Amz-Expires", "300");
+  url.searchParams.set("X-Amz-Expires", String(expiresIn));
   const signer = new AwsClient({
     accessKeyId: config.accessKeyId,
     secretAccessKey: config.secretAccessKey,

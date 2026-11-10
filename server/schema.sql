@@ -10,12 +10,38 @@ CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, clientId TEXT NOT NULL, t
 CREATE INDEX IF NOT EXISTS files_group ON files(groupId,createdAt);
 CREATE INDEX IF NOT EXISTS files_task ON files(taskId);
 CREATE INDEX IF NOT EXISTS files_task_id ON files(taskId,id);
-CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, fileId TEXT NOT NULL REFERENCES files(id), userId TEXT NOT NULL REFERENCES users(id), deviceId TEXT NOT NULL, expiresAt INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS files_expiry_active ON files(expiresAt,id) WHERE status NOT IN('deleted','expired');
+CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, fileId TEXT NOT NULL REFERENCES files(id), userId TEXT NOT NULL REFERENCES users(id), deviceId TEXT NOT NULL, expiresAt INTEGER NOT NULL, runId TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS leases_expiry ON leases(expiresAt);
 CREATE INDEX IF NOT EXISTS leases_user ON leases(userId,expiresAt);
 CREATE INDEX IF NOT EXISTS leases_device ON leases(deviceId,expiresAt);
 CREATE UNIQUE INDEX IF NOT EXISTS leases_file ON leases(fileId);
-CREATE TABLE IF NOT EXISTS upload_demands (deviceId TEXT NOT NULL, userId TEXT NOT NULL REFERENCES users(id), runId TEXT NOT NULL DEFAULT '', expiresAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(deviceId,runId));
+CREATE TABLE IF NOT EXISTS upload_demands (deviceId TEXT NOT NULL, userId TEXT NOT NULL REFERENCES users(id), runId TEXT NOT NULL DEFAULT '', expiresAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL DEFAULT 0, desired INTEGER, PRIMARY KEY(deviceId,runId));
 CREATE INDEX IF NOT EXISTS upload_demands_expiry ON upload_demands(expiresAt);
 CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, userId TEXT, action TEXT NOT NULL, detail TEXT NOT NULL, createdAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_attempts (key TEXT PRIMARY KEY, attempts INTEGER NOT NULL, resetAt INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS export_completion_order (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  fileId TEXT NOT NULL UNIQUE
+);
+CREATE TRIGGER IF NOT EXISTS export_completion_insert
+AFTER INSERT ON files WHEN NEW.status='success'
+BEGIN
+  INSERT INTO export_completion_order(fileId) VALUES (NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS export_completion_update
+AFTER UPDATE OF status ON files WHEN OLD.status<>'success' AND NEW.status='success'
+BEGIN
+  INSERT OR REPLACE INTO export_completion_order(fileId) VALUES (NEW.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS export_completion_terminal
+AFTER UPDATE OF status ON files WHEN OLD.status='success' AND NEW.status IN('expired','deleted')
+BEGIN
+  DELETE FROM export_completion_order WHERE fileId=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS export_completion_delete
+AFTER DELETE ON files
+BEGIN
+  DELETE FROM export_completion_order WHERE fileId=OLD.id;
+END;

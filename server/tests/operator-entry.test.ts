@@ -95,7 +95,7 @@ it('counts distinct recent devices, active leases and leaves only the current se
   for (let i = 0; i < 4; i++) {
     const owner = i === 3 ? 'unlisted' : 'alpha';
     await db.prepare("INSERT INTO files(id,clientId,taskId,groupId,userId,name,relativePath,size,contentType,sha256,objectKey,createdAt,expiresAt) VALUES(?,?, 't','g',?,'x','x',1,'image/png','x',?,'now','later')").bind('f' + i, 'c' + i, owner, 'key' + i).run();
-    await db.prepare('INSERT INTO leases VALUES(?,?,?,?,?)').bind('l' + i, 'f' + i, owner, i === 2 ? 'stale' : i === 1 ? 'device-b' : 'device-a', i === 2 ? 0 : Date.now() + 60000).run();
+    await db.prepare('INSERT INTO leases(id,fileId,userId,deviceId,expiresAt) VALUES(?,?,?,?,?)').bind('l' + i, 'f' + i, owner, i === 2 ? 'stale' : i === 1 ? 'device-b' : 'device-a', i === 2 ? 0 : Date.now() + 60000).run();
   }
   let status = (await call('/operator-status')).body;
   expect(status.profiles[0]).toMatchObject({ onlineDevices: 1, uploadingDevices: 2, uploadSlots: 2 });
