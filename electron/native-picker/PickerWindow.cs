@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Yuntu.Picker
@@ -28,22 +29,25 @@ namespace Yuntu.Picker
         static readonly Color Ink = Color.FromArgb(23, 48, 82), Muted = Color.FromArgb(87, 106, 132),
             Line = Color.FromArgb(216, 228, 243), Mist = Color.FromArgb(246, 249, 254);
         readonly bool folders;
-        readonly string initial;
+        readonly string initial, pictures;
         readonly OwnerWindow owner;
         readonly float scale;
         readonly Panel host = new Panel();
         readonly TextBox address = new TextBox(), search = new TextBox(), filename = new TextBox();
         readonly PickerButton back, forward, up, confirm, thumbnails, details, previewToggle;
         readonly PickerCrumbs crumbs;
-        readonly TableLayoutPanel body;
+        readonly TableLayoutPanel body, driveList;
+        readonly Label driveHeading, loading;
         readonly PreviewPane preview;
         readonly Label status = new Label();
         readonly ToolTip tips = new ToolTip();
         readonly Timer searchDelay = new Timer { Interval = 250 }, ownerCheck = new Timer { Interval = 600 };
         readonly List<string> history = new List<string>();
-        readonly Dictionary<string, PickerButton> places = new Dictionary<string, PickerButton>(StringComparer.OrdinalIgnoreCase);
-        int historyIndex = -1, requestedIndex = -1;
-        bool navigating, accepting, settingFilename, typedName, wantsPreview;
+        readonly List<PickerButton> places = new List<PickerButton>();
+        readonly PickerButton[] driveButtons = new PickerButton[26];
+        uint driveMask;
+        int historyIndex = -1, requestedIndex = -1, locationRequest;
+        bool navigating, resolving, accepting, settingFilename, typedName, wantsPreview, presented, cloaked;
         FolderBrowser browser;
         internal string[] Paths { get; private set; }
         internal Exception Failure { get; private set; }
@@ -153,22 +157,32 @@ namespace Yuntu.Picker
             body = Grid(5, 1);
             body.ColumnStyles.Add(Fixed(143)); body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 1));
             body.ColumnStyles.Add(Flex()); body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 1)); body.ColumnStyles.Add(Fixed(222));
-            var sidebar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, FlowDirection = FlowDirection.TopDown,
-                Padding = new Padding(Px(8), Px(12), Px(8), 0), Margin = Padding.Empty, BackColor = Mist, AutoScroll = true };
-            var section = new Label { Text = "位置", AutoSize = false, Width = Px(114), Height = Px(22), TextAlign = ContentAlignment.TopLeft,
-                Margin = new Padding(Px(9), 0, 0, Px(3)), Font = new Font(Font.FontFamily, 8.5f), ForeColor = Muted };
-            sidebar.Controls.Add(section);
+            var sideScroll = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Mist, AutoScroll = true };
+            var sidebar = SidebarRows();
+            sidebar.Padding = new Padding(Px(8), Px(12), Px(8), Px(6));
+            sideScroll.Controls.Add(sidebar);
+            sidebar.Controls.Add(Section("位置", 0));
             Place(sidebar, "此电脑", Native.Computer, PickerGlyph.Computer);
-            Place(sidebar, "桌面", Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), PickerGlyph.Desktop);
+            Place(sidebar, "桌面", KnownPath(Environment.SpecialFolder.DesktopDirectory), PickerGlyph.Desktop);
             string downloads;
             var downloadsId = new Guid("374DE290-123F-4565-9164-39C4925E467B");
-            if (Native.SHGetKnownFolderPath(ref downloadsId, 0, IntPtr.Zero, out downloads) >= 0) Place(sidebar, "下载", downloads, PickerGlyph.Download);
-            Place(sidebar, "图片", Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), PickerGlyph.Pictures);
-            Place(sidebar, "文档", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), PickerGlyph.Document);
-            body.Controls.Add(sidebar, 0, 0); body.Controls.Add(Rule(), 1, 0);
-            host.Dock = DockStyle.Fill; host.TabStop = true; host.Margin = new Padding(Px(7), Px(7), Px(5), Px(4)); host.BackColor = Color.White;
+            const uint dontVerify = 0x4000; // Redirected known folders may be offline.
+            if (Native.SHGetKnownFolderPath(ref downloadsId, dontVerify, IntPtr.Zero, out downloads) >= 0) Place(sidebar, "下载", downloads, PickerGlyph.Download);
+            pictures = KnownPath(Environment.SpecialFolder.MyPictures);
+            Place(sidebar, "图片", pictures, PickerGlyph.Pictures);
+            Place(sidebar, "文档", KnownPath(Environment.SpecialFolder.MyDocuments), PickerGlyph.Document);
+            driveHeading = Section("驱动器", 9); driveHeading.Visible = false;
+            sidebar.Controls.Add(driveHeading);
+            driveList = SidebarRows(); driveList.RowCount = driveButtons.Length;
+            sidebar.Controls.Add(driveList);
+            RefreshDrives();
+            body.Controls.Add(sideScroll, 0, 0); body.Controls.Add(Rule(), 1, 0);
+            var viewArea = new Panel { Dock = DockStyle.Fill, Margin = new Padding(Px(7), Px(7), Px(5), Px(4)), BackColor = Color.White };
+            host.Dock = DockStyle.Fill; host.TabStop = true; host.Visible = false; host.BackColor = Color.White;
             host.Enter += delegate { if (browser != null) Guard(browser.FocusView); };
-            body.Controls.Add(host, 2, 0);
+            loading = new Label { Dock = DockStyle.Fill, Text = "正在打开文件夹…", TextAlign = ContentAlignment.MiddleCenter, BackColor = Color.White, ForeColor = Muted };
+            viewArea.Controls.Add(host); viewArea.Controls.Add(loading);
+            body.Controls.Add(viewArea, 2, 0);
             body.Controls.Add(Rule(), 3, 0);
             preview = new PreviewPane(scale) { Dock = DockStyle.Fill, Margin = Padding.Empty };
             body.Controls.Add(preview, 4, 0);
@@ -226,12 +240,68 @@ namespace Yuntu.Picker
             tips.SetToolTip(button, name);
             return button;
         }
-        void Place(FlowLayoutPanel panel, string label, string path, PickerGlyph glyph)
+        static string KnownPath(Environment.SpecialFolder folder)
         {
-            if (String.IsNullOrEmpty(path) || places.ContainsKey(path)) return;
-            var button = Button(label, label, glyph, ButtonStyle.Place, delegate { Go(path, -1); });
-            button.Dock = DockStyle.None; button.Size = new Size(Px(125), Px(32));
-            button.Margin = new Padding(0, 0, 0, Px(2)); panel.Controls.Add(button); places.Add(path, button);
+            return Environment.GetFolderPath(folder, Environment.SpecialFolderOption.DoNotVerify);
+        }
+        static TableLayoutPanel SidebarRows()
+        {
+            var rows = new TableLayoutPanel { ColumnCount = 1, Dock = DockStyle.Top, AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty, Padding = Padding.Empty, BackColor = Mist };
+            rows.ColumnStyles.Add(Flex());
+            return rows;
+        }
+        Label Section(string label, int top)
+        {
+            return new Label { Text = label, Dock = DockStyle.Top, Height = Px(22), TextAlign = ContentAlignment.TopLeft,
+                Margin = new Padding(Px(9), Px(top), 0, Px(3)), Font = new Font(Font.FontFamily, 8.5f), ForeColor = Muted };
+        }
+        PickerButton Place(TableLayoutPanel panel, string label, string path, PickerGlyph glyph, int row = -1)
+        {
+            if (String.IsNullOrEmpty(path)) return null;
+            var button = Button(label, label, glyph, ButtonStyle.Place, delegate {
+                if (glyph == PickerGlyph.Drive) OpenLocation(path, false); else Go(path, -1);
+            });
+            button.Tag = path; button.Dock = DockStyle.Top; button.Height = Px(32);
+            button.Margin = new Padding(0, 0, 0, Px(2));
+            if (row < 0) panel.Controls.Add(button); else panel.Controls.Add(button, 0, row);
+            places.Add(button);
+            return button;
+        }
+        [DllImport("kernel32.dll")] static extern uint GetLogicalDrives();
+        void RefreshDrives()
+        {
+            // This mask covers assigned letters, including removable media and mapped shares, without accessing any volume.
+            uint mask = GetLogicalDrives();
+            if (mask == driveMask) return;
+            driveList.SuspendLayout();
+            for (int i = 0; i < driveButtons.Length; i++)
+            {
+                uint bit = 1u << i;
+                if (((mask ^ driveMask) & bit) == 0) continue;
+                if ((mask & bit) != 0)
+                {
+                    string letter = (char)('A' + i) + ":";
+                    var drive = Place(driveList, letter, letter + "\\", PickerGlyph.Drive, i);
+                    drive.Name = "drive" + letter[0]; drive.TabIndex = i;
+                    tips.SetToolTip(drive, letter + "\\"); driveButtons[i] = drive;
+                }
+                else
+                {
+                    var drive = driveButtons[i];
+                    places.Remove(drive); tips.SetToolTip(drive, null);
+                    drive.Dispose(); driveButtons[i] = null;
+                }
+            }
+            driveMask = mask;
+            driveHeading.Visible = mask != 0;
+            driveList.ResumeLayout(true);
+            if (browser != null && browser.Current != null) SelectPlace(browser.Current);
+        }
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            if (driveList != null) RefreshDrives();
         }
         void LayoutPreview()
         {
@@ -272,19 +342,43 @@ namespace Yuntu.Picker
                 browser.Message += ShowMessage;
                 Application.AddMessageFilter(this);
                 if (owner != null) ownerCheck.Start();
-                string first = initial;
-                if (String.IsNullOrEmpty(first) || !Directory.Exists(first)) first = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
-                if (String.IsNullOrEmpty(first) || !Directory.Exists(first)) first = Native.Computer;
-                navigating = true;
                 browser.SetDetails(folders);
-                browser.Open(first);
+                browser.Initialize();
+                Buttons(); confirm.Enabled = false;
+                // Compose the custom chrome and its opaque loading surface before the first visible frame.
+                PaintTree(Handle);
+                DwmFlush();
+                presented = true;
+                if (cloaked) { int off = 0; Marshal.ThrowExceptionForHR(DwmSetWindowAttribute(Handle, DwmCloak, ref off, sizeof(int))); }
+                else Opacity = 1;
                 Native.SetForegroundWindow(Handle);
+                OpenLocation(initial, true);
             }
             catch (Exception error) { Failure = error; Close(); }
         }
 
+        async void OpenLocation(string path, bool initialLocation)
+        {
+            if (browser == null || navigating) return;
+            int request = ++locationRequest;
+            resolving = true; confirm.Enabled = false;
+            if (historyIndex < 0) loading.Text = "正在打开文件夹…";
+            else ShowMessage("正在打开 " + path);
+            // Probe only the requested drive. Unplugged media and offline shares can block a filesystem call.
+            string destination = await Task.Run(delegate {
+                if (!String.IsNullOrEmpty(path) && Directory.Exists(path)) return path;
+                if (!initialLocation) return null;
+                return !String.Equals(pictures, path, StringComparison.OrdinalIgnoreCase) && Directory.Exists(pictures) ? pictures : Native.Computer;
+            });
+            if (IsDisposed || Disposing || request != locationRequest) return;
+            resolving = false;
+            if (destination == null) { CannotNavigate(); return; }
+            Go(destination, -1);
+        }
+
         void EnteredFolder(string path)
         {
+            ++locationRequest; resolving = false;
             searchDelay.Stop(); search.Clear(); searchDelay.Stop();
             if (requestedIndex >= 0 && String.Equals(history[requestedIndex], path, StringComparison.OrdinalIgnoreCase)) historyIndex = requestedIndex;
             else if (historyIndex < 0 || !String.Equals(history[historyIndex], path, StringComparison.OrdinalIgnoreCase))
@@ -295,23 +389,33 @@ namespace Yuntu.Picker
             navigating = false; requestedIndex = -1;
             address.Text = path == Native.Computer ? "此电脑" : path;
             ShowCrumbs();
-            string activePlace = Native.Computer;
-            foreach (var place in places)
+            SelectPlace(path);
+            if (loading.Visible)
             {
-                if (place.Key == Native.Computer) continue;
-                string prefix = place.Key.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-                if (String.Equals(path, place.Key, StringComparison.OrdinalIgnoreCase) || path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                    if (activePlace == Native.Computer || activePlace.Length < place.Key.Length) activePlace = place.Key;
+                host.Visible = true; loading.Visible = false;
+                PaintTree(host.Handle);
             }
-            foreach (var place in places) place.Value.Selected = place.Key == activePlace;
             typedName = false;
             Buttons(); SelectionChanged(); Guard(browser.FocusView);
+        }
+        void SelectPlace(string path)
+        {
+            PickerButton active = places[0];
+            int longest = 0;
+            foreach (var place in places)
+            {
+                string target = (string)place.Tag;
+                string prefix = target.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                if (target.Length >= longest && (String.Equals(path, target, StringComparison.OrdinalIgnoreCase) || path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                { active = place; longest = target.Length; }
+            }
+            foreach (var place in places) place.Selected = place == active;
         }
         void CannotNavigate()
         {
             navigating = false; requestedIndex = -1;
-            if (historyIndex < 0) { Failure = new IOException("Windows 无法打开初始目录。"); Close(); return; }
-            Buttons(); SelectionChanged(); ShowMessage("无法打开该文件夹，请检查路径与访问权限。");
+            if (historyIndex < 0) loading.Text = "无法打开该位置，请选择左侧其他位置。";
+            Buttons(); SelectionChanged(); ShowMessage("无法打开该位置，请检查驱动器连接或访问权限。");
         }
         void Buttons()
         {
@@ -342,14 +446,15 @@ namespace Yuntu.Picker
         void Go(string path, int index)
         {
             if (browser == null || navigating) return;
-            if (String.Equals(path, browser.Current, StringComparison.OrdinalIgnoreCase)) { Guard(browser.FocusView); return; }
+            ++locationRequest; resolving = false;
+            if (String.Equals(path, browser.Current, StringComparison.OrdinalIgnoreCase)) { SelectionChanged(); Guard(browser.FocusView); return; }
             navigating = true; requestedIndex = index; Buttons(); confirm.Enabled = false;
             try { browser.Navigate(path); }
-            catch (Exception error) { navigating = false; requestedIndex = -1; Buttons(); SelectionChanged(); ShowMessage(error.Message); }
+            catch (Exception error) { CannotNavigate(); ShowMessage(error.Message); }
         }
         void SelectionChanged()
         {
-            if (navigating || accepting || browser == null) return;
+            if (resolving || navigating || accepting || browser == null) return;
             Guard(delegate {
                 int count = browser.SelectionCount();
                 string first = count > 0 ? browser.FirstSelectedPath() : null;
@@ -411,7 +516,7 @@ namespace Yuntu.Picker
         }
         void Accept(bool openFolder)
         {
-            if (accepting || navigating || browser == null) return;
+            if (accepting || resolving || navigating || browser == null) return;
             accepting = true;
             try
             {
@@ -456,6 +561,10 @@ namespace Yuntu.Picker
 
         [DllImport("dwmapi.dll")]
         static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+        [DllImport("dwmapi.dll")] static extern int DwmFlush();
+        [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr hwnd, IntPtr rect, IntPtr region, uint flags);
+        const int DwmCloak = 13;
+        static void PaintTree(IntPtr hwnd) { RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero, 0x01 | 0x04 | 0x80 | 0x100); } // Invalidate, erase and synchronously paint all child HWNDs.
         protected override CreateParams CreateParams
         {
             get { var parameters = base.CreateParams; parameters.Style |= 0x00040000; return parameters; } // WS_THICKFRAME
@@ -464,6 +573,7 @@ namespace Yuntu.Picker
         {
             if (message.Msg == 0x83 && message.WParam != IntPtr.Zero) { message.Result = IntPtr.Zero; return; }
             base.WndProc(ref message);
+            if (message.Msg == 0x219 && driveList != null && !Disposing && !IsDisposed) RefreshDrives(); // WM_DEVICECHANGE
             if (message.Msg != 0x84 || message.Result != (IntPtr)1) return;
             int coords = unchecked((int)message.LParam.ToInt64());
             var point = PointToClient(new Point(unchecked((short)coords), unchecked((short)(coords >> 16))));
@@ -476,12 +586,19 @@ namespace Yuntu.Picker
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            if (!presented)
+            {
+                int on = 1;
+                cloaked = DwmSetWindowAttribute(Handle, DwmCloak, ref on, sizeof(int)) >= 0;
+                if (!cloaked) Opacity = 0;
+            }
             int corners = 3, border = ColorTranslator.ToWin32(Line);
             DwmSetWindowAttribute(Handle, 33, ref corners, sizeof(int));
             DwmSetWindowAttribute(Handle, 34, ref border, sizeof(int));
         }
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            ++locationRequest;
             ownerCheck.Stop(); searchDelay.Stop();
             Application.RemoveMessageFilter(this);
             if (browser != null) browser.Dispose();

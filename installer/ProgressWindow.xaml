@@ -1,0 +1,157 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xml:lang="zh-CN" Width="472" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanMinimize"
+        AllowsTransparency="True" Background="Transparent" ShowActivated="False"
+        UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"
+        FontFamily="Microsoft YaHei UI, Microsoft YaHei, Segoe UI" Foreground="#142F56">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Accent" Color="#275DE2"/>
+    <SolidColorBrush x:Key="Muted" Color="#536B89"/>
+    <SolidColorBrush x:Key="CompletedLine" Color="#91B1F3"/>
+    <SolidColorBrush x:Key="UpcomingLine" Color="#DBE5F1"/>
+    <DrawingBrush x:Key="WaitingBrush" TileMode="Tile" Stretch="None"
+                  Viewport="0,0,14,8" ViewportUnits="Absolute" Viewbox="0,0,14,8" ViewboxUnits="Absolute">
+      <DrawingBrush.Drawing>
+        <DrawingGroup>
+          <GeometryDrawing Brush="#DFEAFF" Geometry="M0,0 H14 V8 H0 Z"/>
+          <GeometryDrawing Brush="#A5C3FC" Geometry="M-5,8 L3,0 H9 L1,8 Z M9,8 L17,0 H23 L15,8 Z"/>
+        </DrawingGroup>
+      </DrawingBrush.Drawing>
+    </DrawingBrush>
+    <Style x:Key="Step" TargetType="Label">
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Label">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <Grid Width="16" Height="16" Margin="0,0,6,0">
+                <Ellipse x:Name="Ring" Width="12" Height="12" Stroke="#A7B9CF" StrokeThickness="1.25"/>
+                <Ellipse x:Name="Dot" Width="6" Height="6" Fill="{StaticResource Accent}" Visibility="Collapsed"/>
+                <Path x:Name="Check" Data="M4.5,8 L7,10.5 11.5,5.5" Stroke="#FFFFFF" StrokeThickness="1.5"
+                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"/>
+              </Grid>
+              <ContentPresenter VerticalAlignment="Center"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="Tag" Value="current">
+                <Setter TargetName="Ring" Property="Width" Value="15"/>
+                <Setter TargetName="Ring" Property="Height" Value="15"/>
+                <Setter TargetName="Ring" Property="Stroke" Value="{StaticResource Accent}"/>
+                <Setter TargetName="Ring" Property="StrokeThickness" Value="1.5"/>
+                <Setter TargetName="Dot" Property="Visibility" Value="Visible"/>
+                <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+                <Setter Property="FontWeight" Value="DemiBold"/>
+              </Trigger>
+              <Trigger Property="Tag" Value="done">
+                <Setter TargetName="Ring" Property="Width" Value="15"/>
+                <Setter TargetName="Ring" Property="Height" Value="15"/>
+                <Setter TargetName="Ring" Property="Fill" Value="{StaticResource Accent}"/>
+                <Setter TargetName="Ring" Property="Stroke" Value="{StaticResource Accent}"/>
+                <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <Border CornerRadius="8" Background="#FFFFFF" BorderBrush="#B9CCE4" BorderThickness="1">
+    <StackPanel>
+      <Border CornerRadius="7,7,0,0" BorderBrush="#DAE6F6" BorderThickness="0,0,0,1">
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+            <GradientStop Color="#EDF5FF" Offset="0"/>
+            <GradientStop Color="#F8FBFF" Offset="0.75"/>
+            <GradientStop Color="#F1F7FF" Offset="1"/>
+          </LinearGradientBrush>
+        </Border.Background>
+        <DockPanel Height="35">
+          <Button x:Name="Minimize" DockPanel.Dock="Right" Width="43" FocusVisualStyle="{x:Null}"
+                  AutomationProperties.Name="最小化" ToolTip="最小化">
+            <Button.Template>
+              <ControlTemplate TargetType="Button">
+                <Border x:Name="HitArea" CornerRadius="0,7,0,0" Background="Transparent">
+                  <Rectangle Width="11" Height="1" Fill="#466080"/>
+                </Border>
+                <ControlTemplate.Triggers>
+                  <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="HitArea" Property="Background" Value="#DCEAFF"/></Trigger>
+                  <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="HitArea" Property="BorderBrush" Value="#5484DD"/><Setter TargetName="HitArea" Property="BorderThickness" Value="1"/></Trigger>
+                  <Trigger Property="IsPressed" Value="True"><Setter TargetName="HitArea" Property="Background" Value="#CBDFFF"/></Trigger>
+                </ControlTemplate.Triggers>
+              </ControlTemplate>
+            </Button.Template>
+          </Button>
+          <Grid x:Name="DragArea" Background="Transparent">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="13,0,0,0">
+              <Image x:Name="Brand" Width="22" Height="22" RenderOptions.BitmapScalingMode="HighQuality"/>
+              <TextBlock Text="云图工作台" Margin="6,0,0,0" FontSize="12" FontWeight="DemiBold" Foreground="#28456E" VerticalAlignment="Center"/>
+              <Border Width="1" Height="12" Background="#C7D7EB" Margin="10,0"/>
+              <TextBlock x:Name="Mode" Foreground="{StaticResource Muted}" FontSize="12" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Grid>
+        </DockPanel>
+      </Border>
+      <StackPanel Margin="24,19,24,22">
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <Grid.RowDefinitions><RowDefinition Height="19"/><RowDefinition Height="39"/></Grid.RowDefinitions>
+          <TextBlock x:Name="Version" FontSize="12" Foreground="{StaticResource Muted}" VerticalAlignment="Bottom" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="MetricCaption" Grid.Column="1" Text="解压进度" HorizontalAlignment="Right"
+                     VerticalAlignment="Bottom" FontSize="12" Foreground="{StaticResource Muted}" Visibility="Collapsed"/>
+          <TextBlock x:Name="Headline" Grid.Row="1" FontSize="23" FontWeight="DemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="Percent" Grid.Row="1" Grid.Column="1" FontFamily="Segoe UI" FontSize="29" FontWeight="SemiBold"
+                     VerticalAlignment="Center" Foreground="{StaticResource Accent}" Visibility="Collapsed"/>
+        </Grid>
+        <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" Height="8" Margin="0,12,0,15"
+                     AutomationProperties.LabeledBy="{Binding ElementName=Headline}">
+          <ProgressBar.Template>
+            <ControlTemplate TargetType="ProgressBar">
+              <Grid>
+                <Border x:Name="PART_Track" Background="#E3ECF9" CornerRadius="4"/>
+                <Border x:Name="PART_Indicator" HorizontalAlignment="Left" CornerRadius="4">
+                  <Border.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                      <GradientStop Color="#477FEB" Offset="0"/>
+                      <GradientStop Color="#275DE2" Offset="1"/>
+                    </LinearGradientBrush>
+                  </Border.Background>
+                </Border>
+                <Border x:Name="Activity" CornerRadius="4" Background="{StaticResource WaitingBrush}" Visibility="Collapsed"/>
+              </Grid>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsIndeterminate" Value="True">
+                  <Setter TargetName="PART_Indicator" Property="Visibility" Value="Hidden"/>
+                  <Setter TargetName="Activity" Property="Visibility" Value="Visible"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </ProgressBar.Template>
+        </ProgressBar>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition/>
+            <ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <Label x:Name="PrepareStep" Style="{StaticResource Step}" Content="准备"/>
+          <Border x:Name="PrepareLine" Grid.Column="1" Height="1" Margin="10,0" Background="{StaticResource UpcomingLine}"/>
+          <Label x:Name="ExtractStep" Grid.Column="2" Style="{StaticResource Step}" Content="解压"/>
+          <Border x:Name="ExtractLine" Grid.Column="3" Height="1" Margin="10,0" Background="{StaticResource UpcomingLine}"/>
+          <Label x:Name="WriteStep" Grid.Column="4" Style="{StaticResource Step}" Content="写入"/>
+          <Border x:Name="WriteLine" Grid.Column="5" Height="1" Margin="10,0" Background="{StaticResource UpcomingLine}"/>
+          <Label x:Name="FinishStep" Grid.Column="6" Style="{StaticResource Step}" Content="完成"/>
+        </Grid>
+      </StackPanel>
+      <Border BorderThickness="0,1,0,0" BorderBrush="#E1E9F3" Background="#F6F9FD" CornerRadius="0,0,7,7">
+        <DockPanel Margin="24,12">
+          <Path Width="15" Height="15" Stretch="Uniform" Margin="0,0,8,0" VerticalAlignment="Center"
+                Data="M2,4 Q2,3 3,3 H7 L9,5 H14 Q15,5 15,6 V12 Q15,13 14,13 H3 Q2,13 2,12 Z"
+                Stroke="#6881A3" StrokeThickness="1.25" StrokeLineJoin="Round"/>
+          <TextBlock Text="安装位置" Margin="0,0,10,0" VerticalAlignment="Center" FontSize="12" Foreground="{StaticResource Muted}"/>
+          <TextBlock x:Name="Destination" VerticalAlignment="Center" FontSize="12" Foreground="#365171" TextTrimming="CharacterEllipsis"/>
+        </DockPanel>
+      </Border>
+    </StackPanel>
+  </Border>
+</Window>

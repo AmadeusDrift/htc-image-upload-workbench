@@ -31,7 +31,7 @@ namespace Yuntu.Picker
             this.thumbnailPixels = thumbnailPixels;
         }
 
-        internal void Open(string initial)
+        internal void Initialize()
         {
             browser = (IExplorerBrowser)Activator.CreateInstance(Type.GetTypeFromCLSID(Native.BrowserClass, true));
             ((IObjectWithSite)browser).SetSite(this);
@@ -41,7 +41,7 @@ namespace Yuntu.Picker
             var bounds = Bounds();
             // FWF_NOHEADERINALLVIEWS lets the Shell show its sortable header only in details mode.
             const uint headerOnlyInDetails = 0x01000000;
-            var settings = new FolderSettings { Mode = 1, Flags = headerOnlyInDetails | 0x00112201 };
+            var settings = new FolderSettings { Mode = foldersOnly ? 4 : 1, Flags = headerOnlyInDetails | 0x00112201 };
             browser.Initialize(host.Handle, ref bounds, ref settings);
             initialized = true;
             browser.Advise(this, out cookie);
@@ -52,7 +52,6 @@ namespace Yuntu.Picker
                 hasNativeFilter = true;
             }
             host.Resize += Resize;
-            Navigate(initial);
         }
 
         NativeRect Bounds() { return new NativeRect { Right = host.ClientSize.Width, Bottom = host.ClientSize.Height }; }

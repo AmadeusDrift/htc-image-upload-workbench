@@ -5,7 +5,7 @@ using System.Windows.Forms;
 
 namespace Yuntu.Picker
 {
-    internal enum PickerGlyph { None, Back, Forward, Up, Close, Computer, Desktop, Download, Pictures, Document, Folder, Search, Grid, List, Preview, Cloud, Chevron, Check }
+    internal enum PickerGlyph { None, Back, Forward, Up, Close, Computer, Desktop, Download, Pictures, Document, Drive, Folder, Search, Grid, List, Preview, Cloud, Chevron, Check }
     internal enum ButtonStyle { Tool, Place, Primary, Secondary, Segment, Close }
 
     internal static class PickerPaint
@@ -95,6 +95,10 @@ namespace Yuntu.Picker
                             Stroke(g, pen, P(6, 3), P(13.5f, 3), P(18.5f, 8), P(18.5f, 21), P(5.5f, 21), P(5.5f, 3), P(6, 3));
                             Stroke(g, pen, P(13, 3.5f), P(13, 8.5f), P(18, 8.5f));
                             g.DrawLine(pen, 8.5f, 12.5f, 15.5f, 12.5f); g.DrawLine(pen, 8.5f, 16, 14.3f, 16); break;
+                        case PickerGlyph.Drive:
+                            Stroke(g, pen, P(3, 13), P(6.5f, 5), P(17.5f, 5), P(21, 13));
+                            Frame(g, pen, 3, 12.5f, 18, 6.5f, 1.6f);
+                            g.DrawLine(pen, 15, 16, 17.5f, 16); break;
                         case PickerGlyph.Folder:
                             using (var folder = new GraphicsPath())
                             {
@@ -187,7 +191,13 @@ namespace Yuntu.Picker
         internal bool Selected
         {
             get { return selected; }
-            set { if (selected != value) { selected = value; Invalidate(); } }
+            set
+            {
+                if (selected == value) return;
+                selected = value;
+                if (style == ButtonStyle.Place) AccessibleDescription = selected ? "当前位置" : null;
+                Invalidate();
+            }
         }
 
         int Px(float value) { return (int)Math.Round(value * scale); }

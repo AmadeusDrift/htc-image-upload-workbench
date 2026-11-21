@@ -1,12 +1,13 @@
 ﻿param([string]$Picker = (Join-Path $PSScriptRoot 'ShellPicker.exe'), [string]$Snapshot, [string]$FolderSnapshot)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing, System.Windows.Forms
-Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+Add-Type -ReferencedAssemblies System.Drawing,System.Windows.Forms -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class PickerCheck {
+    public static int ScreenFrames, WindowFrames;
     public delegate bool WindowCallback(IntPtr hwnd, IntPtr unused);
     [DllImport("user32")] static extern bool EnumWindows(WindowCallback callback, IntPtr unused);
     [DllImport("user32")] static extern bool EnumChildWindows(IntPtr parent, WindowCallback callback, IntPtr unused);
@@ -21,7 +22,24 @@ public static class PickerCheck {
     [DllImport("user32")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32")] public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32")] static extern bool GetWindowRect(IntPtr window, out RectangleEdges rect);
+    [DllImport("user32", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder caption, int capacity);
+    [DllImport("dwmapi")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
+    [DllImport("dwmapi")] static extern int DwmFlush();
+    [DllImport("user32")] static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32")] static extern IntPtr WindowFromPoint(Point pt);
+    [DllImport("user32")] static extern IntPtr GetAncestor(IntPtr hwnd, uint ancestor);
+    [DllImport("user32")] static extern IntPtr GetParent(IntPtr hwnd);
+    [DllImport("user32")] static extern bool IsChild(IntPtr parent, IntPtr child);
+    [DllImport("user32")] static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
+    [DllImport("kernel32")] static extern uint GetCurrentThreadId();
+    [DllImport("user32")] static extern bool AttachThreadInput(uint from, uint to, bool attach);
+    [DllImport("user32")] static extern IntPtr SetActiveWindow(IntPtr hwnd);
+    [DllImport("user32")] static extern IntPtr SetFocus(IntPtr hwnd);
+    [DllImport("user32")] static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("gdi32")] static extern int GetPixel(IntPtr dc, int x, int y);
     struct RectangleEdges { public int x, y, right, bottom; }
+    struct GuiThreadInfo { public int size, flags; public IntPtr active, focus, capture, menu, move, caret; public RectangleEdges caretBounds; }
     public static IntPtr WindowFor(int pid) {
         IntPtr result = IntPtr.Zero;
         EnumWindows(delegate(IntPtr hwnd, IntPtr unused) {
@@ -30,6 +48,115 @@ public static class PickerCheck {
             result = hwnd; return false;
         }, IntPtr.Zero);
         return result;
+    }
+    public static string FirstPresentation(int pid, IntPtr owner) {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (watch.ElapsedMilliseconds < 10000) {
+            System.Windows.Forms.Application.DoEvents(); // Service the picker's synchronous modal-owner messages.
+            var hwnd = WindowFor(pid);
+            int cloak;
+            if (hwnd != IntPtr.Zero && GetWindow(hwnd, 4) == owner &&
+                DwmGetWindowAttribute(hwnd, 14, out cloak, sizeof(int)) == 0 && cloak == 0) {
+                bool content = false, title = false, action = false;
+                RectangleEdges picker; GetWindowRect(hwnd, out picker);
+                EnumChildWindows(hwnd, delegate(IntPtr child, IntPtr unused) {
+                    if (!IsWindowVisible(child)) return true;
+                    var name = new StringBuilder(128); GetClassName(child, name, name.Capacity);
+                    var caption = new StringBuilder(64); GetWindowText(child, caption, caption.Capacity);
+                    string text = caption.ToString();
+                    RectangleEdges bounds; GetWindowRect(child, out bounds);
+                    if ((name.ToString() == "SHELLDLL_DefView" || text == "正在打开文件夹…") &&
+                        bounds.bottom - bounds.y > (picker.bottom - picker.y) / 4) content = true;
+                    if (text == "选择图片" || text == "选择文件夹") title = true;
+                    if (text == "取消") action = true;
+                    return true;
+                }, IntPtr.Zero);
+                return title && action && content ? FirstChromeColors(hwnd, picker) : String.Format("title={0}, cancel={1}, folder view or loading surface={2}", title, action, content);
+            }
+            System.Threading.Thread.Sleep(1);
+        }
+        return "no presented picker";
+    }
+    static string FirstChromeColors(IntPtr hwnd, RectangleEdges r) {
+        double scale = GetDpiForWindow(hwnd) / 96.0;
+        int middle = (r.x + r.right) / 2;
+        Point[] points = { new Point(middle, r.y + (int)(13 * scale)), new Point(r.x + (int)(5 * scale), (r.y + r.bottom) / 2), new Point(middle, r.bottom - (int)(13 * scale)) };
+        Color[] colors = { Color.FromArgb(241,246,253), Color.FromArgb(246,249,254), Color.FromArgb(249,251,255) };
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (watch.ElapsedMilliseconds < 2000) {
+            System.Windows.Forms.Application.DoEvents(); DwmFlush();
+            // A background test must not sample an unrelated app or take the user's focus.
+            if (GetForegroundWindow() != hwnd || Array.Exists(points, p => GetAncestor(WindowFromPoint(p), 2) != hwnd)) {
+                using (var bitmap = new Bitmap(r.right - r.x, r.bottom - r.y)) {
+                    using (var graphics = Graphics.FromImage(bitmap)) {
+                        var surface = graphics.GetHdc();
+                        try { if (!PrintWindow(hwnd, surface, 2)) return "could not capture the picker window"; }
+                        finally { graphics.ReleaseHdc(surface); }
+                    }
+                    for (int i = 0; i < points.Length; i++) {
+                        var actual = bitmap.GetPixel(points[i].X - r.x, points[i].Y - r.y);
+                        if (!Matches(actual, colors[i])) return String.Format("window capture region {0}: {1} instead of {2}", i, actual, colors[i]);
+                    }
+                    WindowFrames++; return "ready";
+                }
+            }
+            int matches = 0; var dc = GetDC(IntPtr.Zero);
+            try {
+                for (int i = 0; i < points.Length; i++) {
+                    var pixel = ColorTranslator.FromWin32(GetPixel(dc, points[i].X, points[i].Y));
+                    if (Matches(pixel, colors[i])) matches++;
+                }
+            } finally { ReleaseDC(IntPtr.Zero, dc); }
+            if (matches == 3) { ScreenFrames++; return "ready"; }
+            if (matches > 0) return "partial first painted frame (themed regions: " + matches + "/3)";
+        }
+        return "could not observe a foreground themed frame";
+    }
+    static bool Matches(Color a, Color b) { return Math.Abs(a.R-b.R) + Math.Abs(a.G-b.G) + Math.Abs(a.B-b.B) <= 4; }
+    public static bool InViewport(IntPtr child, IntPtr picker) {
+        RectangleEdges row; GetWindowRect(child, out row);
+        for (var parent = GetParent(child); parent != IntPtr.Zero; parent = GetParent(parent)) {
+            RectangleEdges clip; GetWindowRect(parent, out clip);
+            if (row.y < clip.y || row.bottom > clip.bottom) return false;
+            if (parent == picker) return true;
+        }
+        return false;
+    }
+    public static string TabToDrive(IntPtr picker, IntPtr editor, IntPtr target) {
+        if (!IsChild(picker, editor) || !IsChild(picker, target)) return "missing picker control";
+        uint pid; uint thread = GetWindowThreadProcessId(picker, out pid);
+        uint ownThread = GetCurrentThreadId();
+        // Join only this fixture and its picker. Background windows have no physical keyboard focus.
+        if (!AttachThreadInput(ownThread, thread, true)) return "could not share fixture input";
+        try {
+            SetActiveWindow(picker); SetFocus(editor);
+            return FollowTabs(picker, thread, target);
+        } finally { AttachThreadInput(ownThread, thread, false); }
+    }
+    static string FollowTabs(IntPtr picker, uint thread, IntPtr target) {
+        var info = new GuiThreadInfo { size = Marshal.SizeOf(typeof(GuiThreadInfo)) };
+        IntPtr last = IntPtr.Zero;
+        var trace = new StringBuilder();
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (watch.ElapsedMilliseconds < 3000) {
+            System.Windows.Forms.Application.DoEvents();
+            if (!GetGUIThreadInfo(thread, ref info)) return "unavailable picker input thread";
+            if (info.focus == target) {
+                if (!InViewport(target, picker)) return "focused drive still clipped";
+                PostMessage(target, 0x100, (IntPtr)32, (IntPtr)1);
+                PostMessage(target, 0x101, (IntPtr)32, (IntPtr)1);
+                return "focused";
+            }
+            if (info.focus != last && (info.focus == picker || IsChild(picker, info.focus))) {
+                var name = new StringBuilder(64); GetClassName(info.focus, name, name.Capacity);
+                if (trace.Length < 700) trace.Append(name.ToString().Split('.')[0]).Append(' ');
+                PostMessage(info.focus, 0x100, (IntPtr)9, (IntPtr)1);
+                PostMessage(info.focus, 0x101, (IntPtr)9, (IntPtr)1);
+                last = info.focus;
+            }
+            System.Threading.Thread.Sleep(1);
+        }
+        return String.Format("foreground={0}, focus={1}, order={2}", GetForegroundWindow() == picker, info.focus != IntPtr.Zero, trace);
     }
     public static IntPtr SearchEdit(IntPtr window) {
         RectangleEdges owner; GetWindowRect(window, out owner);
@@ -102,7 +229,7 @@ function Await($what, [scriptblock]$probe) {
         if ($value) { return $value }
         Start-Sleep -Milliseconds 90
     } while ($watch.Elapsed.TotalSeconds -lt 10)
-    $names = if ($script:window) { $script:window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { if ($_.Current.Name) { $_.Current.Name } } }
+    $names = if ($script:window -and !$script:checkingDrives) { $script:window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { if ($_.Current.Name) { $_.Current.Name } } }
     throw "Timed out waiting for $what. Visible elements: $($names -join ', ')"
 }
 function Start-Picker($mode, $startFolder = $fixture) {
@@ -114,6 +241,8 @@ function Start-Picker($mode, $startFolder = $fixture) {
     $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
     $start.StandardOutputEncoding = [Text.Encoding]::UTF8; $start.StandardErrorEncoding = [Text.Encoding]::UTF8
     $script:child = [Diagnostics.Process]::Start($start)
+    $firstSurface = [PickerCheck]::FirstPresentation($script:child.Id, $ownerHwnd)
+    if ($firstSurface -ne 'ready') { throw "Incomplete first visible $mode picker surface ($firstSurface)." }
     $script:hwnd = Await 'owned picker window' { $candidate = [PickerCheck]::WindowFor($script:child.Id); if ($candidate -ne [IntPtr]::Zero) { $candidate } }
     $script:window = [Windows.Automation.AutomationElement]::FromHandle($script:hwnd)
     if ([PickerCheck]::GetWindow($script:hwnd, 4) -ne $ownerHwnd -or [PickerCheck]::IsWindowEnabled($ownerHwnd)) { throw 'Picker did not own its modal relationship.' }
@@ -154,6 +283,44 @@ function Choose($name, $add = $false) {
     $selection = (Item $name).GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern)
     if ($add) { $selection.AddToSelection() } else { $selection.Select() }
 }
+function Check-Drives($mode) {
+    $script:checkingDrives = $true
+    try {
+        $roots = [Environment]::GetLogicalDrives()
+        # Exercise local volumes without waking removable media or reconnecting network drives.
+        $testRoots = @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady } | Select-Object -ExpandProperty Name -First 2)
+        foreach ($root in $roots) {
+            $label = $root.TrimEnd('\')
+            [void](Await "sidebar drive $label" { Find-Element ([Windows.Automation.AutomationElement]::NameProperty) $label })
+        }
+        foreach ($root in $testRoots) {
+            $button = Find-Element ([Windows.Automation.AutomationElement]::NameProperty) $root.TrimEnd('\')
+            if ($button.Current.ControlType -ne [Windows.Automation.ControlType]::Button -and $button.Current.ClassName -notmatch '\.BUTTON\.') { throw "Expected a drive button for $root" }
+            Invoke-Element $button
+            [void](Await "navigation to $root" { Find-Element ([Windows.Automation.AutomationElement]::NameProperty) $root })
+        }
+        for ($i = $testRoots.Count - 1; $i -ge 0; --$i) {
+            $target = if ($i -gt 0) { $testRoots[$i - 1] } else { $fixture }
+            Invoke-Element (Element 'back')
+            [void](Await "back to $target" { Find-Element ([Windows.Automation.AutomationElement]::NameProperty) $target })
+        }
+        if ($testRoots.Count) {
+            $size = $script:window.Current.BoundingRectangle
+            $resize = $script:window.GetCurrentPattern([Windows.Automation.TransformPattern]::Pattern)
+            $resize.Resize($size.Width, $size.Height / 2)
+            $target = $testRoots[-1]
+            $button = Find-Element ([Windows.Automation.AutomationElement]::NameProperty) $target.TrimEnd('\')
+            $keyTarget = [IntPtr]$button.Current.NativeWindowHandle
+            $edit = [PickerCheck]::SearchEdit($script:hwnd)
+            $tabResult = [PickerCheck]::TabToDrive($script:hwnd,$edit,$keyTarget)
+            if ($tabResult -ne 'focused') { throw "Tab could not reach $target ($tabResult)" }
+            [void](Await 'keyboard drive activation' { Find-Element ([Windows.Automation.AutomationElement]::NameProperty) $target })
+            $resize.Resize($size.Width, $size.Height)
+            Invoke-Element (Element 'back'); [void](Item 'Folder A')
+        }
+        "PASS $mode sidebar enumerated $($roots -join ', '), opened $($testRoots -join ', '), supported the keyboard in a short window and returned to the fixture"
+    } finally { $script:checkingDrives = $false }
+}
 function Finish($expected) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     while (!$script:child.HasExited -and $watch.Elapsed.TotalSeconds -lt 10) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 60 }
@@ -190,6 +357,7 @@ try {
 
     Start-Picker 'files'
     [void](Item $first); [void](Item $second)
+    Check-Drives 'files'
     if ((Find-Element ([Windows.Automation.AutomationElement]::NameProperty) 'Unsupported.txt') -or (Find-Element ([Windows.Automation.AutomationElement]::NameProperty) 'Unsupported')) { throw 'File filter included a text file.' }
     [void](Await 'native photo thumbnails' { [PickerCheck]::HasThumbnails($script:hwnd, $null) })
     $searchEdit = [PickerCheck]::SearchEdit($script:hwnd)
@@ -204,6 +372,7 @@ try {
 
     Start-Picker 'folders'
     [void](Item 'Folder A')
+    Check-Drives 'folders'
     if ((Find-Element ([Windows.Automation.AutomationElement]::NameProperty) $second) -or (Find-Element ([Windows.Automation.AutomationElement]::NameProperty) 'Other')) { throw 'Folder filter included an image.' }
     Invoke-Element (Item 'Folder A')
     [void](Await 'folder navigation' { Find-Element ([Windows.Automation.AutomationElement]::NameProperty) $firstFolder })
@@ -260,6 +429,7 @@ try {
             Invoke-Element (Element 'confirm'); Finish @((Join-Path $gallery $folders[0]))
         }
     }
+    "PASS first visible picker surfaces with completed chrome ($([PickerCheck]::ScreenFrames) foreground frames, $([PickerCheck]::WindowFrames) window-only captures)"
 } finally {
     if ($script:child) { if (!$script:child.HasExited) { $script:child.Kill(); $script:child.WaitForExit() }; Write-Host $script:child.StandardError.ReadToEnd(); $script:child.Dispose() }
     $ownerForm.Dispose()

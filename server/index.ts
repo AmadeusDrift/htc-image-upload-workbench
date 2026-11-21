@@ -348,7 +348,7 @@ async function handle(request: Request, env: Env) {
       batchUpload: true,
       packedUpload: true,
       limits: { global: 20, perDevice: 20, allocation: "dynamic-device" },
-      version: "1.5.0",
+      version: "1.5.1",
     });
   const b = method === "POST" || method === "PATCH" ? await parse(request) : {};
   if (path === "/api/operator-status" && method === "GET") {
