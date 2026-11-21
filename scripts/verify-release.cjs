@@ -22,6 +22,9 @@ const updateConfig=updaterRequire('js-yaml').load(fs.readFileSync(path.join(root
 const entries=asar.listPackage(archive);
 const checks={version:pkg.version,customFrame:main.includes('frame:false'),titlebar:js.includes('desktop-titlebar'),backupStore:asar.extractFile(archive,'electron/manifest.cjs').length>0,hashCancel:asar.extractFile(archive,'electron/hash.cjs').length>0,iconEmbedded:installedExecutable.includes(png),installerExecutable:executable.subarray(0,2).toString()==='MZ',updaterIncluded:asar.extractFile(archive,'electron/updater.cjs').length>0,stableAppIdentity:pkg.name==='yuntu-workbench'&&sourcePackage.build.appId==='com.yuntu.workbench',feedConfigured:updateConfig.url===sourcePackage.build.publish[0].url&&updateConfig.useMultipleRangeRequest===false,metadataMatches:metadata.version===version&&metadata.files?.[0]?.url===artifact&&metadata.files[0].size===executable.length&&metadata.files[0].sha512===crypto.createHash('sha512').update(executable).digest('base64'),blockmapPresent:fs.statSync(file+'.blockmap').size>0,privateAcceptanceExcluded:!entries.some(entry=>/acceptance-main|yuntu-release-private|\.publish-/.test(entry)),bytes:executable.length,sha256:crypto.createHash('sha256').update(executable).digest('hex')};
 if(Object.values(checks).some(x=>x===false)||pkg.version!==version)throw Error('Package verification failed');
-fs.copyFileSync(file,path.join('../云图工作台安装包',artifact));
-fs.writeFileSync('../云图工作台安装包/'+version+'构建校验.json',JSON.stringify(checks,null,2));
+const deliveryDirectory=path.resolve(process.argv[3] || '../云图工作台安装包');
+fs.mkdirSync(deliveryDirectory,{recursive:true});
+const deliveryFile=path.join(deliveryDirectory,artifact);
+if(path.resolve(file)!==deliveryFile)fs.copyFileSync(file,deliveryFile);
+fs.writeFileSync(path.join(deliveryDirectory,version+'构建校验.json'),JSON.stringify(checks,null,2));
 console.log(JSON.stringify(checks));

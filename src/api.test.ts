@@ -7,7 +7,7 @@ it('never sends a malformed native device configuration to the login service',as
 });
 it('ends an unreachable service request after15seconds',async()=>{
  vi.stubGlobal('fetch',vi.fn((_url,options)=>new Promise((_resolve,reject)=>options.signal?.addEventListener('abort',()=>reject(new DOMException('aborted','AbortError'))))));
- const {api}=await import('./api');let error='';void api('/health').catch(e=>{error=e.message});await vi.advanceTimersByTimeAsync(15000);expect(error).toContain('连接超时');
+ const {api}=await import('./api');const result=api('/health').catch(e=>e);await vi.advanceTimersByTimeAsync(15000);expect(await result).toMatchObject({name:'TimeoutError',message:expect.stringContaining('连接超时')});
 });
 it('times out when native configuration IPC never answers',async()=>{
  (window as any).desktop.getConfig=()=>new Promise(()=>{});vi.stubGlobal('fetch',vi.fn());const {api}=await import('./api');let error='';void api('/health').catch(e=>{error=e.message});await vi.advanceTimersByTimeAsync(15000);expect(error).toContain('连接超时');expect(fetch).not.toHaveBeenCalled();

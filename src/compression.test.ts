@@ -1,3 +1,4 @@
+import {tmpdir} from 'node:os';
 import {createRequire} from 'node:module';
 import {promises as fs} from 'node:fs';
 import path from 'node:path';
@@ -8,7 +9,7 @@ const {createImagePreparer}=createRequire(import.meta.url)('../electron/compress
 const dirs:string[]=[];
 afterEach(async()=>{await Promise.all(dirs.splice(0).map(dir=>fs.rm(dir,{recursive:true,force:true})))});
 async function fixture(kind:'opaque'|'alpha'|'tiny'|'jpeg'='opaque'){
- const dir=await fs.mkdtemp(path.resolve(process.cwd(),'../../work/yuntu-compression-'));dirs.push(dir);const input=path.join(dir,kind==='jpeg'?'Photo.JPEG':'Product.PNG');const width=kind==='tiny'?1:256,height=width;const data=Buffer.alloc(width*height*4);for(let y=0;y<height;y++)for(let x=0;x<width;x++){const p=(y*width+x)*4;data[p]=x%256;data[p+1]=y%256;data[p+2]=(x+y)%256;data[p+3]=kind==='alpha'&&x===0?100:255}
+ const dir=await fs.mkdtemp(path.join(tmpdir(),'yuntu-compression-'));dirs.push(dir);const input=path.join(dir,kind==='jpeg'?'Photo.JPEG':'Product.PNG');const width=kind==='tiny'?1:256,height=width;const data=Buffer.alloc(width*height*4);for(let y=0;y<height;y++)for(let x=0;x<width;x++){const p=(y*width+x)*4;data[p]=x%256;data[p+1]=y%256;data[p+2]=(x+y)%256;data[p+3]=kind==='alpha'&&x===0?100:255}
  let pipeline=sharp(data,{raw:{width,height,channels:4}});if(kind==='jpeg')pipeline=pipeline.jpeg({quality:100,chromaSubsampling:'4:4:4'}).withIccProfile('srgb');else pipeline=pipeline.png({compressionLevel:kind==='tiny'?9:0});await pipeline.toFile(input);const stat=await fs.stat(input);const h={path:input,size:stat.size,mtimeMs:stat.mtimeMs,name:path.basename(input),relativePath:'folder/'+path.basename(input),contentType:kind==='jpeg'?'image/jpeg':'image/png'};const handles=new Map([['original',h]]);const source=async(id:string)=>{const value=handles.get(id);if(!value)throw Error('untrusted');const current=await fs.stat(value.path);if(current.size!==value.size||current.mtimeMs!==value.mtimeMs)throw Error('changed');return value};return {dir,input,handles,source,original:await fs.readFile(input),cacheDirectory:path.join(dir,'cache'),width,height};
 }
 async function cacheFiles(directory:string){return fs.readdir(directory).catch(()=>[])}

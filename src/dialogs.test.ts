@@ -24,6 +24,49 @@ it('collects bounded export pages before creating the selected product workbook'
  await act(async()=>root.render(React.createElement(ExportDialog,{request:{taskId:'task-a'},settings:{exportFormat:'csv'},onClose:vi.fn(),notify})));await act(async()=>{button('导出').click()});
  expect(paths).toHaveLength(3);expect(new URL('https://example.test'+paths[0]).searchParams.get('snapshot')).toBe('new');expect(new URL('https://example.test'+paths[1]).searchParams.get('snapshot')).toBe('snapshot-token');expect(new URL('https://example.test'+paths[2]).searchParams.get('verify')).toBe('1');expect(paths.every(route=>new URL('https://example.test'+route).searchParams.get('limit')==='500')).toBe(true);expect(new URL('https://example.test'+paths[1]).searchParams.get('cursor')).toBe('cursor-1');const csv=await exported!.text();expect(csv).toContain('"文件夹名","图片1","图片2"');expect(csv).toContain('"001","https://example.com/second","https://example.com/first"');expect(notify).toHaveBeenCalledWith('已导出 1 个产品、2 张图片链接，快照中另有 3 张未完成');
 });
+it('downloads 20,000 links using the larger page size advertised by the snapshot service', async () => {
+ const total = 20000, limits: number[] = [];
+ let verified = false;
+ vi.mocked(api).mockImplementation(async route => {
+  const params = new URL(route, 'https://example.test').searchParams;
+  if (params.get('verify') === '1') { verified = true; return { verified: true } }
+  const offset = Number(params.get('cursor')), limit = Number(params.get('limit'));
+  limits.push(limit);
+  const length = Math.min(limit, total-offset);
+  const files = Array.from({length}, (_, n) => {
+   const id = offset+n, name = (id%10)+'.jpg';
+   return { name, relativePath: Math.floor(id/10)+'/'+name, url: 'https://example.test/img/'+id };
+  });
+  return { ...exportCoverage, eligibleCount: total, files, maxPageSize: 4000, nextCursor: offset+length < total ? String(offset+length) : null };
+ });
+ const download = vi.fn(() => 'blob:large-export');
+ vi.stubGlobal('URL', class extends URL {static createObjectURL=download;static revokeObjectURL=vi.fn()});
+ const notify=vi.fn();
+ await act(async()=>root.render(React.createElement(ExportDialog,{request:{taskId:'task-a'},settings:{exportFormat:'csv'},onClose:vi.fn(),notify})));
+ await act(async()=>{button('导出').click()});
+ expect(limits).toEqual([500,4000,4000,4000,4000,4000]);
+ expect(verified).toBe(true);
+ expect(download).toHaveBeenCalledOnce();
+ expect(notify).toHaveBeenCalledWith('已导出 2000 个产品、20000 张图片链接，快照中另有 3 张未完成');
+});
+it('retries a timed-out larger page on the same snapshot and cursor with the smaller limit', async () => {
+ const reads: string[][] = [];
+ vi.mocked(api).mockImplementation(async route => {
+  const params = new URL(route, 'https://example.test').searchParams;
+  if(params.get('verify')==='1')return {verified:true};
+  const cursor=params.get('cursor')||'',limit=params.get('limit')!;
+  reads.push([params.get('snapshot')!,cursor,limit]);
+  if(limit==='4000')throw new DOMException('连接超时','TimeoutError');
+  const name=(cursor?'2':'1')+'.jpg';
+  return {...exportCoverage, maxPageSize:4000, nextCursor:cursor?null:'after-one', files:[{name,relativePath:'001/'+name,url:'https://example.test/img/'+name}]};
+ });
+ const download=vi.fn(()=>'blob:slow-export');
+ vi.stubGlobal('URL', class extends URL {static createObjectURL=download;static revokeObjectURL=vi.fn()});
+ await act(async()=>root.render(React.createElement(ExportDialog,{request:{taskId:'task-a'},settings:{exportFormat:'csv'},onClose:vi.fn(),notify:vi.fn()})));
+ await act(async()=>{button('导出').click()});
+ expect(reads).toEqual([['new','','500'],['snapshot-token','after-one','4000'],['snapshot-token','after-one','500']]);
+ expect(download).toHaveBeenCalledOnce();
+});
 it('returns to login rather than first-admin setup after initial setup and logout',async()=>{
  vi.mocked(api).mockImplementation(async(route:string)=>{
   if(route==='/health')return {ok:true,initialized:false,storageReady:true};

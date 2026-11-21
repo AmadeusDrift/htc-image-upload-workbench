@@ -15,11 +15,11 @@ export async function api(path:string,options:RequestInit={}){
  const controller=new AbortController();let timedOut=false;let timer:ReturnType<typeof setTimeout>|undefined;
  const externalAbort=()=>controller.abort(options.signal?.reason);
  if(options.signal?.aborted)externalAbort();else options.signal?.addEventListener('abort',externalAbort,{once:true});
- const deadline=new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>{timedOut=true;config=undefined;reject(new Error('连接超时，请检查网络后重试'));controller.abort()},15000)});
+ const deadline=new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>{timedOut=true;config=undefined;const error=new DOMException('连接超时，请检查网络后重试','TimeoutError');reject(error);controller.abort(error)},15000)});
  const request=async()=>{
   const base=await getApiBase();const device=await getDeviceId();if(controller.signal.aborted)throw new DOMException('请求已取消','AbortError');
   const headers=new Headers(options.headers);headers.set('X-Device-Id',device);if(requestToken)headers.set('Authorization','Bearer '+requestToken);if(options.body&&!headers.has('Content-Type'))headers.set('Content-Type','application/json');
-  let response:Response;try{response=await fetch(base+(path.startsWith('/api')?path:'/api'+path),{...options,headers,signal:controller.signal})}catch(error){if(timedOut)throw new Error('连接超时，请检查网络后重试');if(options.signal?.aborted)throw error;throw new Error('连接失败，请检查网络和服务地址后重试')}
+  let response:Response;try{response=await fetch(base+(path.startsWith('/api')?path:'/api'+path),{...options,headers,signal:controller.signal})}catch(error){if(timedOut)throw controller.signal.reason;if(options.signal?.aborted)throw error;throw new Error('连接失败，请检查网络和服务地址后重试')}
   if(response.status===401&&requestToken&&getToken()===requestToken){sessionStorage.removeItem('yuntu-token');window.dispatchEvent(new Event('yuntu-session-expired'))}
   let data:any;try{data=await response.json()}catch{throw new Error('服务响应格式错误，请稍后重试')}
   if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('服务响应格式错误，请稍后重试');

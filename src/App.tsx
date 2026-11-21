@@ -1,10 +1,13 @@
 import {OperatorEntry} from './OperatorEntry';
 import React,{useState,useEffect,useRef} from 'react';
-import {CloudUpload,Folder,Clock,Users,Settings,Cloud,ChevronDown,ChevronRight,Search,RefreshCw,Plus,Link,Download,Trash2,X,Image as ImageIcon,Pause,Play,CheckCircle2,Info,LogOut,KeyRound,Grid2X2,List,AlertCircle} from 'lucide-react';
+import {CloudUpload,Folder,Clock,Users,Settings,Cloud,ChevronDown,ChevronRight,Search,RefreshCw,Plus,Link,Download,Trash2,X,Image as ImageIcon,CheckCircle2,Info,LogOut,KeyRound,Grid2X2,List,AlertCircle,Pencil} from 'lucide-react';
 import {api,json,getDeviceId,getToken,logoutSession} from './api';
-import {UploadEngine} from './upload';
-import {UploadQueueStatus} from './UploadQueueStatus';
+import {UploadEngine, type UploadState} from './upload';
+import {UploadWorkbench} from './UploadWorkbench';
+import {RenameTaskDialog} from './UploadTaskDialogs';
+export {addBrowserDropForSession} from './UploadWorkbench';
 import {productTable,detailTable} from './export';
+import {INITIAL_EXPORT_PAGE_SIZE,MAX_EXPORT_PAGE_SIZE} from '../shared/export-limits';
 const nav=[['upload','上传工作台',CloudUpload],['files','文件管理',Folder],['tasks','上传记录',Clock],['accounts','账号管理',Users],['settings','设置',Settings]] as const;
 const labels:Record<string,string>={pending:'等待中',preparing:'压缩中',hashing:'检查中',scanning:'扫描中',uploading:'上传中',success:'已完成',completed:'已完成',failed:'失败',partial:'部分失败',expired:'已过期',deleted:'已删除',cancelled:'已取消',paused:'已暂停',ready:'准备就绪',active:'启用',disabled:'停用',idle:'等待选择'};
 const bytes=(n=0)=>n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:n<1073741824?`${(n/1048576).toFixed(1)} MB`:`${(n/1073741824).toFixed(1)} GB`;
@@ -15,18 +18,20 @@ function Empty({title='暂无文件',text='选择图片或文件夹，开始创�
 function Modal({title,children,onClose}:{title:string,children:React.ReactNode,onClose:()=>void}){return <div className="overlay" onClick={onClose}><section role="dialog" aria-modal="true" aria-label={title} className="modal" onClick={e=>e.stopPropagation()}><header><h2>{title}</h2><button aria-label="关闭" className="icon" onClick={onClose}><X/></button></header>{children}</section></div>}
 function Toggle({checked,onChange,label}:{checked:boolean,onChange:(b:boolean)=>void,label:string}){return <button type="button" role="switch" aria-label={label} aria-checked={checked} className={'switch '+(checked?'on':'')} onClick={()=>onChange(!checked)}><i/></button>}
 export default function App(){
- const [health,setHealth]=useState<any>(),[user,setUser]=useState<any>(),[groups,setGroups]=useState<any[]>([]),[group,setGroup]=useState(''),[page,setPage]=useState('upload'),[toast,setToast]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false),[reload,setReload]=useState(0),[settings,setSettings]=useState<any>(defaults),[storage,setStorage]=useState<any>({ready:false}),[menu,setMenu]=useState(false),[password,setPassword]=useState(false),[exportRequest,setExport]=useState<any>(),[deleting,setDeleting]=useState<any[]>(),[queue,setQueue]=useState<any>({items:[],status:'idle'}),[online,setOnline]=useState(navigator.onLine);
+ const [health,setHealth]=useState<any>(),[user,setUser]=useState<any>(),[groups,setGroups]=useState<any[]>([]),[group,setGroup]=useState(''),[page,setPage]=useState('upload'),[toast,setToast]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false),[reload,setReload]=useState(0),[settings,setSettings]=useState<any>(defaults),[storage,setStorage]=useState<any>({ready:false}),[menu,setMenu]=useState(false),[password,setPassword]=useState(false),[exportRequest,setExport]=useState<any>(),[deleting,setDeleting]=useState<any[]>(),[queue,setQueue]=useState<UploadState>({items:[],status:'idle'}),[online,setOnline]=useState(navigator.onLine);
  const sessionCleanup=useRef<Promise<void>|undefined>(undefined);
  const [adminEntry,setAdminEntry]=useState(false),[resumeHint,setResumeHint]=useState<{ownerId:string;unfinished:number}>();const loginPending=useRef(false);
  const [settingsReady,setSettingsReady]=useState(false);
- const engine=useRef<UploadEngine|undefined>(undefined);const fileInput=useRef<HTMLInputElement>(null),folderInput=useRef<HTMLInputElement>(null);
+ const engine = useRef<UploadEngine | undefined>(undefined);
+ const [connection, setConnection] = useState<'checking' | 'online' | 'offline'>('checking');
+ const [nameRevision, setNameRevision] = useState(0);
  if(!engine.current)engine.current=new UploadEngine(setQueue);
  const refresh=()=>setReload(n=>n+1);const notify=(s:string)=>{setToast(s);setTimeout(()=>setToast(''),5000)};
  const run=async(fn:()=>Promise<any>)=>{setBusy(true);setError('');try{return await fn()}catch(e:any){setError(e.message)}finally{setBusy(false)}};
- const resetLocalSession=()=>{setAdminEntry(false);setSettingsReady(false);setSettings({...defaults});setStorage({ready:false});engine.current!.setOptions(defaults);setUser(undefined);setGroups([]);setGroup('');setMenu(false);setPassword(false);setExport(undefined);setDeleting(undefined);setToast('');setPage('upload')};
+ const resetLocalSession=()=>{setAdminEntry(false);setConnection('checking');setSettingsReady(false);setSettings({...defaults});setStorage({ready:false});engine.current!.setOptions(defaults);setUser(undefined);setGroups([]);setGroup('');setMenu(false);setPassword(false);setExport(undefined);setDeleting(undefined);setToast('');setPage('upload')};
  const detachEngine=()=>{if(!sessionCleanup.current){const cleanup=(async()=>{try{await engine.current!.pause()}finally{await engine.current!.bindUser('')}})();sessionCleanup.current=cleanup;void cleanup.finally(()=>{if(sessionCleanup.current===cleanup)sessionCleanup.current=undefined}).catch(()=>{})}return sessionCleanup.current};
  useEffect(()=>{const expired=()=>{const cleanup=detachEngine();resetLocalSession();setError('登录已失效，请重新登录');void cleanup.catch(()=>{})};const net=()=>setOnline(navigator.onLine);window.addEventListener('yuntu-session-expired',expired);window.addEventListener('online',net);window.addEventListener('offline',net);return()=>{window.removeEventListener('yuntu-session-expired',expired);window.removeEventListener('online',net);window.removeEventListener('offline',net)}},[]);
- useEffect(()=>{run(async()=>{const h=await api('/health');setHealth(h);engine.current!.setOptions({batchUpload:h.batchUpload===true});if(getToken()){const meToken=getToken();const me=await api('/me');if(getToken()!==meToken)return;await engine.current!.bindUser(me.user.id);if(getToken()!==meToken)return;setUser(me.user);setGroups(me.groups);setGroup(g=>g||me.groups[0]?.id||'')}})},[reload]);
+ useEffect(()=>{run(async()=>{const h=await api('/health');setHealth(h);engine.current!.setOptions({batchUpload:h.batchUpload===true,packedUpload:h.packedUpload===true});if(getToken()){const meToken=getToken();const me=await api('/me');if(getToken()!==meToken)return;await engine.current!.bindUser(me.user.id);if(getToken()!==meToken)return;setUser(me.user);setGroups(me.groups);setGroup(g=>g||me.groups[0]?.id||'')}})},[reload]);
  // Employee checkpoints are restored before publishing a logged-in session.
  useEffect(()=>{if(!user)return;setSettingsReady(false);let active=true;const token=getToken();api('/settings').then(d=>{if(!active||getToken()!==token)return;setSettings({...defaults,...d.settings});setStorage(d.storage);engine.current!.setOptions(d.settings);setSettingsReady(true)}).catch(e=>{if(active&&getToken()===token)setError(e.message)});return()=>{active=false}},[user?.id,reload]);
  useEffect(()=>{
@@ -34,13 +39,28 @@ export default function App(){
   const desktop=window.desktop;if(desktop)void desktop.loadManifest().then(data=>{if(!active)return;const unfinished=(data?.items||[]).filter((item:any)=>item.status!=='success').length;setResumeHint(data?.ownerId&&unfinished?{ownerId:data.ownerId,unfinished}:undefined)}).catch(error=>{if(active)setError('读取本机进度失败：'+error.message)});
   return()=>{active=false};
  },[user?.id,health?.operatorEntryEnabled,reload]);
- useEffect(()=>{
-  if(!user||!health?.operatorEntryEnabled)return;let active=true,pending=false,controller:AbortController|undefined;
-  const heartbeat=async()=>{if(pending||!active)return;pending=true;controller=new AbortController();try{await api('/presence',{signal:controller.signal})}catch{}finally{pending=false}};
-  void heartbeat();const timer=setInterval(()=>void heartbeat(),15000);
-  const leave=()=>{void api('/presence/leave',{...json('POST',{}),keepalive:true}).catch(()=>{})};window.addEventListener('pagehide',leave);
-  return()=>{active=false;clearInterval(timer);controller?.abort();window.removeEventListener('pagehide',leave)};
- },[user?.id,health?.operatorEntryEnabled]);
+ useEffect(() => {
+  if (!user || !online) return;
+  const token = getToken();
+  const controller = new AbortController();
+  let pending = false;
+  setConnection('checking');
+  const heartbeat = async () => {
+   if (pending) return;
+   pending = true;
+   try {
+    const result = await api('/presence', {signal: controller.signal});
+    if (!controller.signal.aborted && getToken() === token) setConnection(result.ok === true ? 'online' : 'offline');
+   } catch {
+    if (!controller.signal.aborted && getToken() === token) setConnection('offline');
+   } finally { pending = false; }
+  };
+  void heartbeat();
+  const timer = setInterval(heartbeat, 15000);
+  const leave = () => { void api('/presence/leave', {...json('POST', {}), keepalive:true}).catch(() => {}); };
+  window.addEventListener('pagehide', leave);
+  return () => { clearInterval(timer); controller.abort(); window.removeEventListener('pagehide', leave); };
+ }, [user?.id, online]);
  const enterSession=async(values:any,operator=false)=>{
   if(loginPending.current)return;loginPending.current=true;
   try{return await run(async()=>{
@@ -56,21 +76,64 @@ export default function App(){
    }catch(error){if(getToken()===d.token){void logoutSession(()=>api('/logout',json('POST',{})),()=>{sessionStorage.removeItem('yuntu-token');resetLocalSession()}).catch(()=>{})}throw error;}
   })}finally{loginPending.current=false}
  };
- const allowed=(permission:string)=>user?.role==='admin'||Boolean(user?.permissions?.[permission]??groups.find(g=>g.id===group)?.permissions?.[permission]);
- const chooseFiles=()=>{if(!settingsReady){setError('账号配置尚未就绪，请稍后重试');return}if((window as any).desktop)run(()=>engine.current!.addDesktopFiles());else fileInput.current?.click()};
- const chooseFolder=()=>{if(!settingsReady){setError('账号配置尚未就绪，请稍后重试');return}if((window as any).desktop)run(()=>engine.current!.addDesktopFolder());else folderInput.current?.click()};
- const addFiles=(files:File[])=>run(async()=>{if(!settingsReady)throw Error('账号配置尚未就绪，请稍后重试');if((window as any).desktop)await engine.current!.addDesktopDropped(files);else await engine.current!.addBrowserFiles(files)});
+ const allowed = (permission: string, groupId = group) => user?.role === 'admin'
+  || Boolean(user?.permissions?.[permission] ?? groups.find(item => item.id === groupId)?.permissions?.[permission]);
+ const renameRecord = async (id: string, name: string) => {
+  const token = getToken();
+  const current = engine.current!.state;
+  const task = !current.legacyAhead && current.worklist?.[0];
+  if (task && current.taskId === id) await engine.current!.renameDesktopTask(task.id, name);
+  else await api('/tasks/' + encodeURIComponent(id), json('PATCH', { name }));
+  if (getToken() === token) setNameRevision(value => value + 1);
+ };
+ const canRenameRecord = (task: any) => allowed('upload', task.groupId) && (user?.role === 'admin' || task.userId === user?.id);
+ const recordVersion = JSON.stringify([reload, nameRevision, queue.taskId, queue.worklist?.[0]?.name, queue.status === 'completed']);
  const retryTask=(id:string)=>{setPage('upload');if(queue.taskId===id)run(async()=>{await engine.current!.retryTask(id);refresh()});else notify('本机没有保留此任务源文件，请重新选择失败图片并上传。')};
  const logout=async()=>{setBusy(true);setError('');try{try{await detachEngine()}finally{void logoutSession(()=>api('/logout',json('POST',{})),resetLocalSession).catch((e:any)=>{if(!getToken())setError('已在本机退出。'+e.message)})}}catch(e:any){if(!getToken())setError('已在本机退出。'+e.message)}finally{setBusy(false)}};
  if(!user){const cards=!adminEntry&&(!health||health.initialized&&health.operatorEntryEnabled);return <div className="login"><div className="login-brand"><Cloud size={52}/><h1>云图工作台</h1><p>统一管理图片，让每一次上传都有序可循。</p><div className="login-feature"><CloudUpload/>批量上传 · 自动保留目录<Folder/>统一账号 · 图片保留 7 天</div></div><div className={'login-panel '+(cards?'operator-panel':'')}>{cards?<OperatorEntry busy={busy} error={error} resume={resumeHint} onAdmin={()=>{setError('');setAdminEntry(true)}} onEnter={username=>enterSession({username},true)}/>:<>{adminEntry&&<button className="text" onClick={()=>{setAdminEntry(false);setError('')}} disabled={busy}>返回账号选择</button>}<Auth initialized={health?.initialized} adminMode={adminEntry} busy={busy} error={error} onSubmit={(values:any)=>enterSession(values)}/></>}{!health&&<button onClick={refresh}><RefreshCw size={16}/>重新连接服务</button>}</div></div>}
 
- return <div className="app"><aside className="sidebar"><div className="brand"><Cloud size={40}/><b>云图工作台</b></div><nav>{nav.map(([key,title,Icon],i)=><React.Fragment key={key}>{i===3&&<hr/>}<button className={page===key?'active':''} onClick={()=>{setPage(key);setError('')}}><Icon size={23}/>{title}</button></React.Fragment>)}</nav><div className="service"><i className={health?.ok&&online?'green':'red'}/>{online?(health?.storageReady?'服务正常':'存储待配置'):'网络已断开'}</div></aside><div className="workspace"><header className="topbar"><span>工作空间 <em>/</em> <strong>{nav.find(n=>n[0]===page)?.[1]}</strong></span><div className="top-actions"><select aria-label="切换业务账号" value={group} onChange={e=>{setGroup(e.target.value);refresh()}}><option value="">{groups.length?'选择业务账号':'暂无业务账号'}</option>{groups.filter(g=>g.status!=='disabled').map(g=><option value={g.id} key={g.id}>{g.name}</option>)}</select><div className="profile"><button onClick={()=>setMenu(!menu)}><span className="avatar">{user.displayName?.[0]||'员'}</span>{user.displayName||user.username}<ChevronDown size={16}/></button>{menu&&<div className="dropdown"><small>{user.username} · {user.role==='admin'?'管理员':'员工'}</small>{!(health?.operatorEntryEnabled&&user.role==='employee')&&<button onClick={()=>{setPassword(true);setMenu(false)}}><KeyRound size={16}/>修改密码</button>}<button onClick={logout}><LogOut size={16}/>{health?.operatorEntryEnabled&&user.role==='employee'?'切换账号':'退出登录'}</button></div>}</div></div></header><main><div className="page-heading"><h1>{nav.find(n=>n[0]===page)?.[1]}</h1><p>{{upload:'批量上传图片，生成可直接使用的图片链接',files:'查找、管理和导出已上传的图片',tasks:'查看任务进度、检查失败原因并导出链接',accounts:'统一管理业务账号与员工访问权限',settings:'管理上传偏好与公司存储配置'}[page]}</p></div>{error&&<div role="alert" className="notice danger"><AlertCircle size={18}/>{error}<button className="icon" onClick={()=>setError('')}><X size={16}/></button></div>}{user.mustChangePassword&&!(health?.operatorEntryEnabled&&user.role==='employee')&&<div className="notice warning"><KeyRound size={18}/>请修改初始密码后继续使用。<button onClick={()=>setPassword(true)}>修改密码</button></div>}
- {page==='upload'&&<><input hidden multiple accept="image/*" ref={fileInput} type="file" onChange={e=>{addFiles(Array.from(e.target.files||[]));e.target.value=''}}/><input hidden multiple {...{webkitdirectory:''} as any} ref={folderInput} type="file" onChange={e=>{addFiles(Array.from(e.target.files||[]));e.target.value=''}}/><div className="dropzone" onDragOver={e=>{e.preventDefault();e.currentTarget.classList.add('drag')}} onDragLeave={e=>e.currentTarget.classList.remove('drag')} onDrop={e=>{e.preventDefault();if(!settingsReady){setError('账号配置尚未就绪，请稍后重试');return}e.currentTarget.classList.remove('drag');const dt=e.dataTransfer;if((window as any).desktop)addFiles(Array.from(dt.files));else run(async()=>{await addBrowserDropForSession(()=>readDroppedFiles(dt),files=>engine.current!.addBrowserFiles(files))})}}><CloudUpload size={65}/><h2>拖入图片或文件夹</h2><p>支持 JPG、PNG、WebP 等图片，自动保留目录结构 · 单图最大 50 MB</p><div className="actions"><button onClick={chooseFolder} disabled={busy||!settingsReady}><Folder/>选择文件夹</button><button className="primary" onClick={chooseFiles} disabled={busy||!settingsReady}><ImageIcon/>选择图片</button></div></div>{!settingsReady&&<div className="notice"><Info size={18}/>账号配置尚未就绪，请等待或重新读取。<button onClick={refresh}>重新读取</button></div>}{settingsReady&&!storage.ready&&<div className="notice warning"><Info size={18}/>公司存储尚未连接，请联系管理员在设置中完成配置。{user.role==='admin'&&<button onClick={()=>setPage('settings')}>前往设置</button>}</div>}<section className="card queue"><header><h2>本次上传</h2><span>{queue.items.length} 张图片 · <QueueByteSummary items={queue.items}/></span></header><QueuePersistenceWarning error={queue.persistenceError}/>
- {queue.missingCheckpointItems>0&&<div role="alert" className="notice warning">
-  <AlertCircle size={18}/>本地清单还缺 {queue.missingCheckpointItems} 张。请重新选择原来的图片或文件夹，补齐后继续原任务。
- </div>}{queue.items.length?<><QueueList items={queue.items} onCopy={value=>copy(value,notify)}/><UploadQueueStatus queue={queue} online={online}/><footer className="queue-footer"><div className="queue-summary"><span>已完成 <b>{queue.items.filter((f:any)=>f.status==='success').length} / {queue.items.length}</b></span><span>失败 <b>{queue.items.filter((f:any)=>f.status==='failed').length}</b></span><progress value={queueUploadProgress(queue.items)} max={queue.items.length*100}/></div><div className="actions">{queue.status==='uploading'?<button onClick={()=>engine.current!.pause()}><Pause size={17}/>暂停上传</button>:<button className="primary" title={!group?'请先创建或选择业务账号':!storage.ready?'请先连接存储':''} disabled={!settingsReady||!group||!storage.ready||!allowed('upload')||queue.status==='scanning'} onClick={()=>run(async()=>{if(queue.status==='paused')await engine.current!.resume();else await engine.current!.start(group);refresh()})}><Play size={17}/>{queue.status==='paused'?'继续上传':'开始上传'}</button>}<button disabled={!queue.items.some((f:any)=>f.status==='failed')} onClick={()=>run(()=>engine.current!.retryFailed())}>仅重试失败</button><button disabled={!queue.taskId||!allowed('export')} onClick={()=>setExport({taskId:queue.taskId})}><Download size={17}/>导出 Excel</button><button className="text" onClick={()=>engine.current!.cancel()} disabled={!['uploading','paused','ready'].includes(queue.status)}>取消任务</button><button className="text" disabled={queue.status==='uploading'} onClick={()=>engine.current!.clear()}>清空</button></div></footer>{queue.error&&<div className="notice danger">{queue.error}</div>}</>:<Empty action={<button onClick={chooseFolder}>选择文件夹</button>}/>}</section>{allowed('view')&&<Records compact group={group} reload={reload} onError={setError} onExport={setExport} onRetry={(id:string)=>retryTask(id)} onView={()=>setPage('tasks')}/>}</>}
+ const liveConnection = online ? connection : 'offline';
+ const connectionLabel = {checking: '正在检查连接', online: '账号已连接', offline: '账号连接已断开'}[liveConnection];
+ const accountName = health?.operatorEntryEnabled && user.role === 'employee' ? user.username : user.displayName || user.username;
+ const pageTitle = nav.find(item => item[0] === page)?.[1];
+ return <div className={'app' + (page === 'upload' ? ' upload-page' : '')}>
+  <aside className="sidebar"><div className="brand"><Cloud size={36}/><b>云图工作台</b></div>
+   <nav aria-label="工作空间导航">{nav.map(([key,title,Icon],i) => <React.Fragment key={key}>{i === 3 && <hr/>}
+    <button aria-current={page === key ? 'page' : undefined} aria-label={title} title={title} className={page === key ? 'active' : ''}
+     onClick={() => { setPage(key); setMenu(false); setError(''); }}><Icon size={21}/><span>{title}</span></button></React.Fragment>)}</nav>
+   <div className="service"><i className="account-presence" data-state={liveConnection}/>{!online ? '网络已断开' : liveConnection === 'offline' ? '服务未连接' : liveConnection === 'checking' ? '正在检查连接' : health?.storageReady ? '服务正常' : '存储待配置'}</div>
+  </aside>
+  <div className="workspace"><header className="topbar">
+   <span className="workspace-crumb"><Grid2X2 size={15}/>工作空间<ChevronRight size={13}/><strong>{pageTitle}</strong></span>
+   <div className="profile"><button type="button" aria-expanded={menu} title={connectionLabel} onClick={() => setMenu(!menu)}>
+    <i className="account-presence" data-state={liveConnection} role="img" aria-label={connectionLabel}/>{accountName}<ChevronDown size={15}/></button>
+    {menu && <div className="dropdown"><small>{user.username} · {user.role === 'admin' ? '管理员' : '员工'} · {connectionLabel}</small>
+     <label className="profile-group">业务账号<select aria-label="切换业务账号" value={group} onChange={event => { setGroup(event.target.value); setMenu(false); setError(''); }}>
+      <option value="">{groups.length ? '选择业务账号' : '暂无业务账号'}</option>
+      {groups.filter(item => item.status !== 'disabled').map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+     {!(health?.operatorEntryEnabled && user.role === 'employee') && <button onClick={() => { setPassword(true); setMenu(false); }}><KeyRound size={16}/>修改密码</button>}
+     <button onClick={logout}><LogOut size={16}/>{health?.operatorEntryEnabled && user.role === 'employee' ? '切换账号' : '退出登录'}</button></div>}
+   </div>
+  </header><main><div className="page-heading"><h1>{pageTitle}</h1>
+   <p>{{upload:'批量上传图片，生成可直接使用的图片链接',files:'查找、管理和导出已上传的图片',tasks:'查看任务进度、检查失败原因并导出链接',accounts:'统一管理业务账号与员工访问权限',settings:'管理上传偏好与公司存储配置'}[page]}</p>
+  </div>
+  {error && <div role="alert" className="notice danger"><AlertCircle size={18}/>{error}<button className="icon" aria-label="关闭提示" onClick={() => setError('')}><X size={16}/></button></div>}
+  {user.mustChangePassword && !(health?.operatorEntryEnabled && user.role === 'employee') && <div className="notice warning"><KeyRound size={18}/>请修改初始密码后继续使用。<button onClick={() => setPassword(true)}>修改密码</button></div>}
+  {page === 'upload' && <>
+   <UploadWorkbench key={JSON.stringify([user.id, group])} engine={engine.current} queue={queue} group={group} online={online}
+    settingsReady={settingsReady} storageReady={storage.ready} canUpload={id => allowed('upload', id)} canExport={id => allowed('export', id)}
+    onError={setError} notify={notify} onExport={setExport} onRenameRecord={renameRecord}
+    renderFiles={() => <><div className="queue-detail-bytes"><QueueByteSummary items={queue.items}/></div><QueueList items={queue.items} onCopy={value => copy(value, notify)}/></>}>
+    {!settingsReady && <div className="notice"><Info size={18}/>账号配置尚未就绪，请等待或重新读取。<button onClick={refresh}>重新读取</button></div>}
+    {settingsReady && !storage.ready && <div className="notice warning"><Info size={18}/>公司存储尚未连接，请联系管理员在设置中完成配置。{user.role === 'admin' && <button onClick={() => setPage('settings')}>前往设置</button>}</div>}
+    <QueuePersistenceWarning error={queue.persistenceError}/>
+    {queue.missingCheckpointItems > 0 && <div role="alert" className="notice warning"><AlertCircle size={18}/>本地清单还缺 {queue.missingCheckpointItems} 张。请重新选择原来的图片或文件夹，补齐后继续原任务。</div>}
+   </UploadWorkbench>
+   {allowed('view') && <Records compact group={group} reload={recordVersion} onError={setError} onExport={setExport} onRetry={retryTask}
+    canRename={canRenameRecord} onRename={renameRecord} onView={() => setPage('tasks')}/>}
+  </>}
  {page==='files'&&<Files groups={groups} group={group} reload={reload} allowed={allowed} onError={setError} onExport={setExport} onDelete={setDeleting} notify={notify}/>}
- {page==='tasks'&&<Records group={group} reload={reload} onError={setError} onExport={setExport} onRetry={(id:string)=>retryTask(id)}/>}
+ {page === 'tasks' && <Records group={group} reload={recordVersion} onError={setError} onExport={setExport} onRetry={retryTask} canRename={canRenameRecord} onRename={renameRecord}/>}
  {page==='accounts'&&(user.role==='admin'?<Accounts groups={groups} onError={setError} notify={notify} refresh={refresh}/>:<Empty title="需要管理员权限" text="请联系管理员调整业务账号或员工访问权限。"/>)}
  {page==='settings'&&<SettingsPage settings={settings} storage={storage} admin={user.role==='admin'} onError={setError} notify={notify} onSaved={refresh}/>}
 </main></div>{toast&&<div className="toast" role="status"><CheckCircle2 size={20}/>{toast}<button className="icon" onClick={()=>setToast('')}><X size={16}/></button></div>}{password&&<Password initialPassword={user.mustChangePassword} onClose={()=>setPassword(false)} onSave={async(v:any)=>{const token=getToken();setError('');const result=await api('/password',json('POST',v));if(result.ok!==true)throw Error('密码保存结果未确认，请重新登录确认');if(getToken()!==token)return;setPassword(false);setUser((current:any)=>current?{...current,mustChangePassword:false}:current);notify('密码修改成功，下次登录请使用新密码')}}/>} {exportRequest&&<ExportDialog request={exportRequest} settings={settings} onClose={()=>setExport(undefined)} notify={notify}/>} {deleting&&<DeleteDialog count={deleting.length} onClose={()=>setDeleting(undefined)} onDelete={async()=>{const token=getToken();await api('/files/delete',json('POST',{ids:deleting.map(file=>file.id)}));if(getToken()!==token)return;setDeleting(undefined);refresh();notify('图片已删除')}}/>}</div>
@@ -114,7 +177,8 @@ export function Files({groups,group,reload,allowed,onError,onExport,onDelete,not
  useEffect(()=>{setFiles([]);setTotal(0);setSelected([]);setDetail(undefined);setLoading(true);const timer=setTimeout(load,250);return()=>{clearTimeout(timer);sequence.current++;request.current?.abort()}},[scope]);
  const picked=files.filter(f=>selected.includes(f.id));const valid=picked.filter(f=>f.status==='success'&&f.url);return <><div className="toolbar"><div className="search"><Search size={19}/><input placeholder="搜索文件名或目录" value={search} onChange={e=>{setSearch(e.target.value);setP(1)}}/></div><select aria-label="筛选文件状态" value={status} onChange={e=>{setStatus(e.target.value);setP(1)}}><option value="">全部状态</option>{['success','pending','uploading','failed','expired','deleted'].map(s=><option key={s} value={s}>{labels[s]}</option>)}</select><button onClick={load}><RefreshCw size={18}/>刷新</button><div className="segmented"><button aria-label="列表视图" className={!grid?'chosen':''} onClick={()=>setGrid(false)}><List/></button><button aria-label="网格视图" className={grid?'chosen':''} onClick={()=>setGrid(true)}><Grid2X2/></button></div></div><div className={'files-layout '+(detail?'has-detail':'')}><section className="card"><div className="selection-bar"><b>已选 {selected.length} 项</b><button disabled={!valid.length} onClick={()=>copy(valid.map(f=>f.url).join('\n'),notify)}><Link size={17}/>复制链接</button><button disabled={!allowed('export')} onClick={()=>onExport({groupId:group,fileIds:selected.length?selected:undefined})}><Download size={17}/>导出 Excel</button><button className="danger-outline" disabled={!selected.length||!allowed('delete')} onClick={()=>onDelete(picked)}><Trash2 size={17}/>删除</button></div>{loading?<div className="loading">正在加载文件…</div>:!files.length?<Empty title="暂无匹配文件" text="上传图片后，文件会显示在这里。也可以调整搜索与筛选条件。"/>:grid?<div className="file-grid">{files.map(f=><article key={f.id} className={selected.includes(f.id)?'selected':''}><input aria-label={'选择 '+f.name} type="checkbox" checked={selected.includes(f.id)} onChange={e=>setSelected(e.target.checked?[...selected,f.id]:selected.filter(id=>id!==f.id))}/><button className="preview-button" onClick={()=>setDetail(f)}>{f.status==='success'?<img alt={f.name} src={f.url}/>:<ImageIcon size={42}/>}<strong>{f.name}</strong></button><Badge status={f.status}/></article>)}</div>:<div className="table-scroll"><table><thead><tr><th><input type="checkbox" aria-label="选择本页所有文件" checked={files.length>0&&selected.length===files.length} onChange={e=>setSelected(e.target.checked?files.map(f=>f.id):[])}/></th><th>文件名</th><th>大小</th><th>上传时间</th><th>状态</th><th/></tr></thead><tbody>{files.map(f=><tr className={selected.includes(f.id)?'selected':''} key={f.id}><td><input type="checkbox" aria-label={'选择 '+f.name} checked={selected.includes(f.id)} onChange={e=>setSelected(e.target.checked?[...selected,f.id]:selected.filter(id=>id!==f.id))}/></td><td><button className="file-name" onClick={()=>setDetail(f)}>{f.status==='success'?<img src={f.url} alt=""/>:<ImageIcon size={30}/>}<span>{f.name}<small>{f.relativePath!==f.name?f.relativePath:''}</small></span></button></td><td>{bytes(f.size)}</td><td>{date(f.createdAt)}</td><td><Badge status={f.status}/></td><td><button className="text" onClick={()=>setDetail(f)}>详情</button></td></tr>)}</tbody></table></div>}<Pagination total={total} page={p} count={files.length} onPage={setP} pageSize={100}/></section>{detail&&<aside className="card detail"><header><h2>文件详情</h2><button className="icon" aria-label="关闭文件详情" onClick={()=>setDetail(undefined)}><X/></button></header>{detail.status==='success'?<img className="detail-preview" src={detail.url} alt={detail.name}/>:<div className="detail-placeholder"><ImageIcon size={56}/></div>}<h3>{detail.name}</h3><dl><dt>所属账号</dt><dd>{groups.find((g:any)=>g.id===detail.groupId)?.name||detail.groupId}</dd><dt>上传时间</dt><dd>{date(detail.createdAt)}</dd><dt>到期时间</dt><dd>{date(detail.expiresAt)}</dd><dt>文件大小</dt><dd>{bytes(detail.size)}</dd><dt>目录</dt><dd>{detail.relativePath}</dd><dt>状态</dt><dd><Badge status={detail.status}/></dd></dl>{detail.error&&<div className="notice danger">{detail.error}</div>}<div className="notice"><Info size={18}/>图片保留 7 天，到期后自动清理</div><label>图片链接<input readOnly value={detail.url||'上传成功后生成链接'}/></label><button className="primary wide" disabled={detail.status!=='success'} onClick={()=>copy(detail.url,notify)}><Link size={17}/>复制链接</button>{detail.status==='success'&&<a className="button wide" href={detail.url} target="_blank" rel="noreferrer" download={detail.name}><Download size={17}/>打开原图</a>}</aside>}</div></>}
 function Pagination({total,page,count,onPage,pageSize=50}:any){return <footer className="pagination"><span>共 {total} 项</span><div><button disabled={page<=1} onClick={()=>onPage(page-1)} aria-label="上一页">‹</button><b>{page}</b><button disabled={count===0||page*pageSize>=total} onClick={()=>onPage(page+1)} aria-label="下一页">›</button></div></footer>}
-export function Records({group,reload,onError,onExport,onRetry,compact=false,onView}:any){
+export function Records({group,reload,onError,onExport,onRetry,compact=false,onView,canRename,onRename}:any){
+ const [rename, setRename] = useState<{task: any; scope: string}>();
  const [tasks,setTasks]=useState<any[]>([]),[total,setTotal]=useState(0),[search,setSearch]=useState(''),[status,setStatus]=useState(''),[days,setDays]=useState('7'),[p,setP]=useState(1),[expanded,setExpanded]=useState<any>(),[detail,setDetail]=useState<any>();
  const [detailPaging,setDetailPaging]=useState<{cursors:string[],page:number,next:string|null}>({cursors:[''],page:0,next:null}),[detailLoading,setDetailLoading]=useState(false);const detailBusy=useRef(false);
  const owner=getToken(),scope=JSON.stringify([group,reload,search,status,days,p,owner]);const currentScope=useRef(scope);currentScope.current=scope;
@@ -125,7 +189,42 @@ export function Records({group,reload,onError,onExport,onRetry,compact=false,onV
  useEffect(()=>{setTasks([]);setTotal(0);closeDetail();const timer=setTimeout(load,250);return()=>{clearTimeout(timer);sequence.current++;detailSequence.current++;request.current?.abort();detailRequest.current?.abort()}},[scope]);
  const loadDetailPage=async(task:any,cursor:string,page:number,cursors:string[])=>{detailRequest.current?.abort();const controller=detailRequest.current=new AbortController(),version=++detailSequence.current,token=owner;detailBusy.current=true;setDetailLoading(true);const current=()=>mounted.current&&!controller.signal.aborted&&detailSequence.current===version&&expandedKey.current===task.id&&currentScope.current===scope&&getToken()===token;try{const query=new URLSearchParams({limit:'100'});if(cursor)query.set('cursor',cursor);const data=await api('/tasks/'+task.id+'?'+query,{signal:controller.signal});if(current()){setDetail({...data,files:(data.files||[]).slice(0,100)});setDetailPaging({cursors,page,next:typeof data.nextCursor==='string'&&data.nextCursor?data.nextCursor:null})}}catch(error:any){if(current())onError(error.message)}finally{if(current()){detailBusy.current=false;setDetailLoading(false)}}};
  const expand=async(task:any)=>{const collapse=expandedKey.current===task.id;closeDetail();if(collapse)return;expandedKey.current=task.id;setExpanded(task.id);await loadDetailPage(task,'',0,[''])};
- const changeDetailPage=(task:any,direction:number)=>{if(detailBusy.current)return;const page=detailPaging.page+direction;if(page<0||(direction>0&&!detailPaging.next))return;const cursors=direction>0?[...detailPaging.cursors.slice(0,page),detailPaging.next!]:detailPaging.cursors;void loadDetailPage(task,cursors[page],page,cursors)}; return <>{!compact&&<div className="toolbar"><div className="search"><Search size={19}/><input placeholder="搜索任务名称" value={search} onChange={e=>{setSearch(e.target.value);setP(1)}}/></div><select aria-label="任务时间" value={days} onChange={e=>{setDays(e.target.value);setP(1)}}><option value="1">最近 1 天</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option><option value="365">最近一年</option></select><select aria-label="任务状态" value={status} onChange={e=>{setStatus(e.target.value);setP(1)}}><option value="">全部状态</option>{['pending','uploading','success','partial','failed'].map(s=><option key={s} value={s}>{labels[s]}</option>)}</select><button onClick={load}><RefreshCw size={18}/>刷新</button></div>}<section className="card records">{compact&&<header><h2>最近任务</h2><button className="text" onClick={onView}>全部记录 <ChevronRight size={16}/></button></header>}{tasks.length?<div className="table-scroll"><table><thead><tr><th>任务名称</th><th>图片数量</th><th>成功</th><th>失败</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{tasks.slice(0,compact?3:tasks.length).map(t=><React.Fragment key={t.id}><tr className={expanded===t.id?'selected':''}><td><button className="text task-name" onClick={()=>expand(t)}><ChevronRight className={expanded===t.id?'rotate':''} size={17}/>{t.name}</button></td><td>{t.total}</td><td>{t.success}</td><td>{t.failed}</td><td><Badge status={t.status}/></td><td>{date(t.createdAt)}</td><td><button className="text" onClick={()=>expand(t)}>查看详情</button></td></tr>{expanded===t.id&&detail&&<tr><td colSpan={7}><div className="task-detail"><div className="notice"><Info size={18}/>耗时 {((t.durationMs||0)/1000).toFixed(1)} 秒 · 共 {t.total} 张图片 · 当前显示 {detail.files?.length?detailPaging.page*100+1:0}–{detailPaging.page*100+(detail.files?.length||0)} 项</div><table><thead><tr><th>文件名</th><th>大小</th><th>状态</th><th>错误原因</th></tr></thead><tbody>{detail.files?.map((f:any)=><tr key={f.id}><td>{f.relativePath||f.name}</td><td>{bytes(f.size)}</td><td><Badge status={f.status}/></td><td>{f.error||'—'}</td></tr>)}</tbody></table><div className="pagination"><span>{detailLoading?'正在加载图片明细…':'每页 100 张'}</span><div><button disabled={detailLoading||detailPaging.page===0} aria-label="任务图片上一页" onClick={()=>changeDetailPage(t,-1)}>‹</button><b>第 {detailPaging.page+1} 页</b><button disabled={detailLoading||!detailPaging.next} aria-label="任务图片下一页" onClick={()=>changeDetailPage(t,1)}>›</button></div></div><div className="actions"><button className="primary" disabled={!t.failed} onClick={()=>onRetry(t.id)}>重试失败图片</button><button onClick={()=>onExport({taskId:t.id})}><Download size={17}/>导出成功链接</button><small className="muted">重试需要本机原始文件；仅成功且未过期的图片进入导出。</small></div></div></td></tr>}</React.Fragment>)}</tbody></table></div>:<Empty title="暂无上传记录" text="上传任务创建后，可以在这里查看进度与结果。"/>}{!compact&&<Pagination total={total} page={p} count={tasks.length} onPage={setP}/>}</section></>}
+ const changeDetailPage=(task:any,direction:number)=>{if(detailBusy.current)return;const page=detailPaging.page+direction;if(page<0||(direction>0&&!detailPaging.next))return;const cursors=direction>0?[...detailPaging.cursors.slice(0,page),detailPaging.next!]:detailPaging.cursors;void loadDetailPage(task,cursors[page],page,cursors)};
+ return <>
+  {!compact && <div className="toolbar"><div className="search"><Search size={19}/><input placeholder="搜索任务名称" value={search} onChange={e => { setSearch(e.target.value); setP(1); }}/></div>
+   <select aria-label="任务时间" value={days} onChange={e => { setDays(e.target.value); setP(1); }}><option value="1">最近 1 天</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option><option value="365">最近一年</option></select>
+   <select aria-label="任务状态" value={status} onChange={e => { setStatus(e.target.value); setP(1); }}><option value="">全部状态</option>{['pending','uploading','success','partial','failed'].map(state => <option key={state} value={state}>{labels[state]}</option>)}</select>
+   <button onClick={load}><RefreshCw size={18}/>刷新</button></div>}
+  {compact && <div className="upload-section-head recent-heading"><h2>最近任务</h2><button className="text" onClick={onView}>全部记录<ChevronRight size={15}/></button></div>}
+  <section className={'card records' + (compact ? ' recent-records' : '')}>
+   {tasks.length ? <div className="table-scroll"><table aria-label={compact ? '最近上传任务' : '上传记录'}>
+    <thead><tr><th>任务名称</th><th>图片数量</th>{!compact && <><th>成功</th><th>失败</th></>}<th className="record-time">创建时间</th><th>状态</th><th>操作</th></tr></thead>
+    <tbody>{tasks.slice(0, compact ? 3 : tasks.length).map(task => <React.Fragment key={task.id}>
+     <tr className={expanded === task.id ? 'selected' : ''}>
+      <td><button className="text task-name" title={task.name} aria-expanded={expanded === task.id} onClick={() => expand(task)}>
+       {compact ? <span className="record-mark"><Folder size={16}/></span> : <ChevronRight size={16} className={expanded === task.id ? 'rotate' : ''}/>}<span>{task.name}</span></button></td>
+      <td>{task.total}</td>{!compact && <><td>{task.success}</td><td>{task.failed}</td></>}<td className="record-time">{date(task.createdAt)}</td><td><Badge status={task.status}/></td>
+      <td><button className="text" onClick={() => expand(task)}>查看详情</button></td>
+     </tr>
+     {expanded === task.id && detail && <tr><td colSpan={compact ? 5 : 7}>
+      <div className="task-detail">
+       <div className="notice"><Info size={18}/>耗时 {((task.durationMs || 0) / 1000).toFixed(1)} 秒 · 共 {task.total} 张图片 · 当前显示 {detail.files?.length ? detailPaging.page * 100 + 1 : 0}–{detailPaging.page * 100 + (detail.files?.length || 0)} 项</div>
+       <table><thead><tr><th>文件名</th><th>大小</th><th>状态</th><th>错误原因</th></tr></thead><tbody>{detail.files?.map((file: any) => <tr key={file.id}><td>{file.relativePath || file.name}</td><td>{bytes(file.size)}</td><td><Badge status={file.status}/></td><td>{file.error || '—'}</td></tr>)}</tbody></table>
+       <div className="pagination"><span>{detailLoading ? '正在加载图片明细…' : '每页 100 张'}</span><div>
+        <button disabled={detailLoading || detailPaging.page === 0} aria-label="任务图片上一页" onClick={() => changeDetailPage(task, -1)}>‹</button>
+        <b>第 {detailPaging.page + 1} 页</b><button disabled={detailLoading || !detailPaging.next} aria-label="任务图片下一页" onClick={() => changeDetailPage(task, 1)}>›</button>
+       </div></div>
+       <div className="actions"><button className="primary" disabled={!task.failed} onClick={() => onRetry(task.id)}>重试失败图片</button>
+        <button onClick={() => onExport({taskId:task.id})}><Download size={16}/>导出成功链接</button>
+        {onRename && canRename?.(task) && <button onClick={() => setRename({task, scope})}><Pencil size={15}/>重命名任务</button>}
+        <small className="muted">重试需要本机原始文件，仅成功且未过期的图片可导出。</small>
+       </div>
+      </div></td></tr>}
+    </React.Fragment>)}</tbody></table></div> : <Empty title="暂无上传记录" text="上传任务创建后，可以在这里查看进度与结果。"/>}
+   {!compact && <Pagination total={total} page={p} count={tasks.length} onPage={setP}/>}
+  </section>
+  {rename?.scope === scope && <RenameTaskDialog key={rename.task.id} name={rename.task.name} onClose={() => setRename(undefined)} onSave={name => onRename(rename.task.id, name)}/>}
+ </>}
 function Accounts({groups,onError,notify,refresh}:any){const [tab,setTab]=useState('groups'),[users,setUsers]=useState<any[]>([]),[edit,setEdit]=useState<any>(),[saving,setSaving]=useState(false);const load=()=>api('/users').then(d=>setUsers(d.users)).catch(e=>onError(e.message));useEffect(()=>{load()},[groups]);const newEntry=()=>setEdit(tab==='groups'?{name:'',status:'active'}:{username:'',displayName:'',password:'',role:'employee',status:'active',groupIds:[],permissions:{upload:true,view:true,export:true,delete:false}});const save=async(e:React.FormEvent)=>{e.preventDefault();setSaving(true);try{const path='/'+tab+(edit.id?'/'+edit.id:'');const body={...edit};if(!body.password)delete body.password;await api(path,json(edit.id?'PATCH':'POST',body));setEdit(undefined);refresh();load();notify('账号已保存')}catch(e:any){onError(e.message)}finally{setSaving(false)}};return <><div className="tabs"><button className={tab==='groups'?'selected':''} onClick={()=>{setTab('groups');setEdit(undefined)}}>业务账号</button><button className={tab==='users'?'selected':''} onClick={()=>{setTab('users');setEdit(undefined)}}>员工登录</button><button className="primary tab-action" onClick={newEntry}><Plus size={18}/>{tab==='groups'?'新建业务账号':'新增员工'}</button></div><div className="notice"><Info size={19}/>业务账号用于区分图片和任务，员工登录用于控制访问权限。</div><div className={'account-layout '+(edit?'editing':'')}><section className="card"><div className="table-scroll"><table><thead><tr>{(tab==='groups'?['业务账号','状态','今日上传','在线设备','操作']:['员工','登录账号','角色','状态','操作']).map(t=><th key={t}>{t}</th>)}</tr></thead><tbody>{(tab==='groups'?groups:users).map((a:any,i:number)=><tr key={a.id}><td><span className={'account-avatar color'+i%5}>{(a.name||a.displayName||a.username)[0]}</span><b>{a.name||a.displayName}</b></td>{tab==='groups'?<><td><Badge status={a.status}/></td><td>{bytes(a.todayBytes)}</td><td>{a.onlineDevices||0}</td></>:<><td>{a.username}</td><td>{a.role==='admin'?'管理员':'员工'}</td><td><Badge status={a.status}/></td></>}<td><button className="text" onClick={()=>setEdit({...a,password:'',groupIds:a.groupIds||[],permissions:{upload:false,view:false,export:false,delete:false,...a.permissions}})}>编辑</button></td></tr>)}</tbody></table></div>{!(tab==='groups'?groups:users).length&&<Empty title={tab==='groups'?'暂无业务账号':'暂无员工'} text="创建账号后即可分配员工访问权限。" action={<button onClick={newEntry}><Plus size={16}/>新建</button>}/>}<footer className="pagination">合计 {(tab==='groups'?groups:users).length} 个{tab==='groups'?'业务账号':'员工账号'}</footer></section>{edit&&<aside className="card editor"><header><h2>{edit.id?'编辑':'新建'}{tab==='groups'?'业务账号':'员工'}</h2><button className="icon" aria-label="关闭编辑" onClick={()=>setEdit(undefined)}><X/></button></header><form onSubmit={save}>{tab==='groups'?<label>账号名称<input required maxLength={80} value={edit.name} onChange={e=>setEdit({...edit,name:e.target.value})}/></label>:<><label>员工姓名<input required value={edit.displayName} onChange={e=>setEdit({...edit,displayName:e.target.value})}/></label><label>登录账号<input required value={edit.username} onChange={e=>setEdit({...edit,username:e.target.value})}/></label><label>{edit.id?'重置密码（留空不修改）':'初始密码（至少 8 位）'}<input type="password" autoComplete="new-password" minLength={8} required={!edit.id} value={edit.password} onChange={e=>setEdit({...edit,password:e.target.value})}/></label><label>角色<select value={edit.role} onChange={e=>setEdit({...edit,role:e.target.value})}><option value="employee">员工</option><option value="admin">管理员</option></select></label></>}<div className="setting-row"><span>账号状态</span><Toggle label="启用账号" checked={edit.status==='active'} onChange={v=>setEdit({...edit,status:v?'active':'disabled'})}/><span>{edit.status==='active'?'启用':'停用'}</span></div>{tab==='users'&&<><label>可访问的业务账号</label><div className="checkbox-list">{groups.map((g:any)=><label key={g.id}><input type="checkbox" checked={edit.groupIds.includes(g.id)} onChange={e=>setEdit({...edit,groupIds:e.target.checked?[...edit.groupIds,g.id]:edit.groupIds.filter((id:string)=>id!==g.id)})}/>{g.name}</label>)}</div><label>权限范围</label><div className="checkbox-list">{Object.entries({upload:'上传图片',view:'查看本组文件',export:'导出链接',delete:'删除文件'}).map(([key,label])=><label key={key}><input type="checkbox" checked={edit.permissions[key]} onChange={e=>setEdit({...edit,permissions:{...edit.permissions,[key]:e.target.checked}})}/>{label}</label>)}</div><div className="notice"><Info size={17}/>管理员可访问全部业务账号。禁用员工后，其当前登录立即失效。</div></>}<div className="setting-row"><span>上传并发</span><b>动态分配</b><small>按活跃上传设备共享公司 20 路名额</small></div><div className="modal-actions"><button type="button" onClick={()=>setEdit(undefined)}>取消</button><button className="primary" disabled={saving}>{saving?'保存中…':'保存修改'}</button></div></form></aside>}</div></>}
 function SettingsPage({settings,storage,admin,onError,notify,onSaved}:any){const [tab,setTab]=useState('upload'),[v,setV]=useState({...settings}),[keys,setKeys]=useState({accessKeyId:'',secretAccessKey:'',endpoint:storage.endpoint||'',bucket:storage.bucket||''}),[saving,setSaving]=useState(false);useEffect(()=>{setV({...settings});setKeys(k=>({...k,endpoint:storage.endpoint||'',bucket:storage.bucket||''}))},[settings,storage]);const save=async()=>{setSaving(true);try{await api('/settings',json('PATCH',{settings:v}));notify('设置已保存');onSaved()}catch(e:any){onError(e.message)}finally{setSaving(false)}};const test=async()=>{setSaving(true);try{const r=await api('/storage/test',json('POST',{}));notify(r.message||'存储连接正常');onSaved()}catch(e:any){onError(e.message)}finally{setSaving(false)}};return <><div className="tabs">{[['upload','上传设置'],['export','导出设置'],['storage','存储连接']].map(([k,t])=><button key={k} className={tab===k?'selected':''} onClick={()=>setTab(k)}>{t}</button>)}</div><div className="settings-layout"><section className="card settings-card"><h2>{tab==='upload'?'上传设置':tab==='export'?'导出偏好':'存储连接'}</h2>{tab==='upload'?<>{/* Compression comparison is integrated separately in the upload queue. */}<div className="setting-row"><span>并发上传</span><b className="limit">单机最高 20 路</b><small>公司总并发 20 路，按正在上传的设备动态平分</small></div><div className="setting-row"><span>自动重试</span><Toggle label="自动重试" checked={v.retries>0} onChange={b=>setV({...v,retries:b?3:0})}/><small>网络波动时自动重试失败文件</small></div><div className="setting-row"><span>重试次数</span><input className="number" type="number" min={0} max={3} value={v.retries} onChange={e=>setV({...v,retries:Math.max(0,Math.min(3,Number(e.target.value)))})}/><small>失败后最多重试 3 次</small></div>{[['scanSubfolders','扫描子文件夹','包含所选目录下的图片'],['checkDuplicates','上传前检查重复','跳过本次队列中目录、名称与大小相同的图片'],['notify','上传完成后通知','系统允许通知时，任务完成后显示通知']].map(([k,t,d])=><div className="setting-row" key={k}><span>{t}</span><Toggle label={t} checked={v[k]} onChange={b=>setV({...v,[k]:b})}/><small>{d}</small></div>)}</>:tab==='export'?<><div className="setting-row"><span>默认导出格式</span><select value={v.exportFormat} onChange={e=>setV({...v,exportFormat:e.target.value})}><option value="xlsx">Excel (.xlsx)</option><option value="csv">CSV (.csv)</option></select></div><div className="setting-row"><span>链接顺序</span><select value={v.sort} onChange={e=>setV({...v,sort:e.target.value})}><option value="name">按文件名排序</option><option value="createdAt">按上传时间排序</option></select></div><div className="notice"><Info size={18}/>导出仅包含上传成功且未过期的图片。文件名和目录将保留。</div><p className="muted">导出时由系统选择保存位置。CSV 使用 UTF-8 编码，可在 Excel 中打开。</p></>:<><div className="notice"><Info size={18}/>存储配置由管理员维护。密钥保存后不会回显。</div>{admin?<form onSubmit={async e=>{e.preventDefault();setSaving(true);try{await api('/storage',json('POST',keys));setKeys({...keys,accessKeyId:'',secretAccessKey:''});notify('存储配置已保存');onSaved()}catch(e:any){onError(e.message)}finally{setSaving(false)}}}><label>R2 服务地址<input required type="url" value={keys.endpoint} onChange={e=>setKeys({...keys,endpoint:e.target.value})}/></label><label>存储桶<input required value={keys.bucket} onChange={e=>setKeys({...keys,bucket:e.target.value})}/></label><label>Access Key ID<input required autoComplete="off" value={keys.accessKeyId} onChange={e=>setKeys({...keys,accessKeyId:e.target.value})}/></label><label>Secret Access Key<input required type="password" autoComplete="new-password" value={keys.secretAccessKey} onChange={e=>setKeys({...keys,secretAccessKey:e.target.value})}/></label><small className="muted">服务地址与存储桶须与公司部署配置一致。</small><button className="primary wide" disabled={saving}>保存存储配置</button></form>:<p>请联系管理员配置公司存储。</p>}</>}</section><aside><section className="card storage-summary"><header><h2>公司存储</h2><Badge status={storage.ready?'active':'pending'}/></header><dl><dt>存储服务商</dt><dd>Cloudflare R2</dd><dt>图片保留</dt><dd>7 天</dd><dt>链接地址</dt><dd>{storage.publicBaseUrl||'使用公司服务地址'}</dd><dt>存储状态</dt><dd>{storage.ready?'已连接':'待配置'}</dd></dl><div className="notice"><Info size={18}/>仅管理员可修改存储配置。</div><button className="wide" disabled={saving||!admin} title={!admin?'需要管理员权限':''} onClick={test}><Link size={18}/>测试连接</button></section><div className="notice advice"><Info size={20}/><div><b>上传说明</b><p>公司共享 20 路上传名额：1 台最多 20 路，2 台各 10 路，4 台各 5 路。同一账号的不同电脑分别参与分配；仅打开软件不占名额。</p></div></div></aside></div>{tab!=='storage'&&<div className="settings-footer"><button onClick={()=>setV({...defaults})}>恢复默认</button><button onClick={()=>setV({...settings})}>取消修改</button><button className="primary" disabled={saving} onClick={save}>保存设置</button></div>}</>}
 export function ExportDialog({request,settings,onClose,notify}:any){
@@ -135,22 +234,34 @@ export function ExportDialog({request,settings,onClose,notify}:any){
  useEffect(()=>{active.current=true;return()=>{active.current=false;requestController.current?.abort()}},[]);
  const close=()=>{active.current=false;requestController.current?.abort();onClose()};
  const perform=async()=>{if(pending.current)return;pending.current=true;const token=getToken(),controller=new AbortController();requestController.current=controller;const current=()=>active.current&&!controller.signal.aborted&&getToken()===token;setSaving(true);setError('');setCoverage(undefined);try{
-  const qs=new URLSearchParams({limit:'500',snapshot:'new'});
+  let pageSize=INITIAL_EXPORT_PAGE_SIZE;
+  const qs=new URLSearchParams({snapshot:'new'});
   if(request.taskId)qs.set('taskId',request.taskId);else qs.set('groupId',request.groupId||'');
   for(const id of request.fileIds||[])qs.append('id',id);
   const filesByUrl=new Map<string,any>(),seen=new Set<string>();
   let snapshot:string|undefined,cursor:string|undefined;
   let counts:{snapshotAt:string,eligibleCount:number,unfinishedCount:number}|undefined;
   do{
+   qs.set('limit',String(pageSize));
    if(cursor)qs.set('cursor',cursor);
-   const page=await api('/export?'+qs,{signal:controller.signal});if(!current())return;
-   if(!Array.isArray(page.files)||page.files.length>500||typeof page.snapshot!=='string'||!page.snapshot||
+   let page;
+   try{
+    page=await api('/export?'+qs,{signal:controller.signal});
+   }catch(error:any){
+    if(!current())return;
+    if(pageSize<=INITIAL_EXPORT_PAGE_SIZE||error?.name!=='TimeoutError')throw error;
+    pageSize=INITIAL_EXPORT_PAGE_SIZE;
+    continue; // Same cursor and snapshot. Keep smaller pages for the rest of this export.
+   }
+   if(!current())return;
+   if(!Array.isArray(page.files)||page.files.length>pageSize||typeof page.snapshot!=='string'||!page.snapshot||
       typeof page.snapshotAt!=='string'||!Number.isFinite(Date.parse(page.snapshotAt))||
       !Number.isSafeInteger(page.eligibleCount)||page.eligibleCount<0||!Number.isSafeInteger(page.unfinishedCount)||page.unfinishedCount<0){
     throw Error('导出响应格式错误，请重试');
    }
    if(!counts){
     snapshot=page.snapshot;qs.set('snapshot',snapshot!);
+    if(Number.isSafeInteger(page.maxPageSize)&&page.maxPageSize>pageSize)pageSize=Math.min(page.maxPageSize,MAX_EXPORT_PAGE_SIZE);
     counts={snapshotAt:page.snapshotAt,eligibleCount:page.eligibleCount,unfinishedCount:page.unfinishedCount};setCoverage(counts);
    }else if(page.snapshot!==snapshot||page.snapshotAt!==counts.snapshotAt||page.eligibleCount!==counts.eligibleCount||page.unfinishedCount!==counts.unfinishedCount){
     throw Error('导出快照已改变，请重新导出');
@@ -164,7 +275,7 @@ export function ExportDialog({request,settings,onClose,notify}:any){
   const files=[...filesByUrl.values()];
   if(files.length!==counts!.eligibleCount)throw Error('导出期间有图片到期或被删除，请重新导出');
   if(!files.length)throw Error('没有可导出的成功图片');
-  const table=layout==='product'?productTable(files):detailTable(files,settings.sort,date);
+  const table=layout==='product'?productTable(files):detailTable(files,settings.sort);
   const safe=(value:any)=>typeof value==='number'?value:/^[=+@\t\r-]/.test(String(value??''))?"'"+String(value):String(value??'');
   const headers=table.headers,data=table.rows.map(row=>row.map(safe));let blob:Blob;
   if(format==='xlsx'){
@@ -178,7 +289,7 @@ export function ExportDialog({request,settings,onClose,notify}:any){
    const csv=[headers,...data].map(row=>row.map(value=>'"'+String(value??'').replaceAll('"','""')+'"').join(',')).join('\r\n');blob=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'});
   }
   if(!current())return;
-  qs.delete('cursor');qs.set('verify','1');
+  qs.delete('cursor');qs.set('limit',String(INITIAL_EXPORT_PAGE_SIZE));qs.set('verify','1');
   const verified=await api('/export?'+qs,{signal:controller.signal});if(!current())return;
   if(verified.verified!==true)throw Error('导出快照核对失败，请重新导出');
   const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`云图${layout==='product'?'产品':''}链接-${new Date().toISOString().slice(0,10)}.${format}`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -197,25 +308,11 @@ export function ExportDialog({request,settings,onClose,notify}:any){
 }
 
 
-async function readDroppedFiles(data:DataTransfer):Promise<File[]>{
- const entries=Array.from(data.items).map((i:any)=>i.webkitGetAsEntry?.()).filter(Boolean);if(!entries.length)return Array.from(data.files);
- const result:File[]=[];const visit=async(entry:any,path:string)=>{if(entry.isFile){const file:File=await new Promise((resolve,reject)=>entry.file(resolve,reject));Object.defineProperty(file,'webkitRelativePath',{value:path+file.name,configurable:true});result.push(file)}else if(entry.isDirectory){const reader=entry.createReader();for(;;){const batch:any[]=await new Promise((resolve,reject)=>reader.readEntries(resolve,reject));if(!batch.length)break;for(const child of batch)await visit(child,path+entry.name+'/')}}};for(const entry of entries)await visit(entry,'');return result;
-}
-
-
-
-
-
-
 export function QueuePersistenceWarning({error}:{error?:string}){return error?<div role="alert" className="notice warning"><AlertCircle size={18}/><div><b>本地任务保存失败，重启恢复可能不完整</b><br/><span>{error}</span></div></div>:null}
 export function QueueList({items,onCopy}:{items:any[],onCopy:(value:string)=>void}){
  const [page,setPage]=useState(1);const pageSize=100;const totalPages=Math.max(1,Math.ceil(items.length/pageSize));const activePage=Math.min(page,totalPages);const start=(activePage-1)*pageSize;const end=Math.min(start+pageSize,items.length);
  useEffect(()=>{if(page!==activePage)setPage(activePage)},[page,activePage]);
  return <><div className="queue-list">{items.slice(start,end).map((f:any)=><div className="queue-item" key={f.id}>{f.previewUrl?<img src={f.previewUrl} alt=""/>:<ImageIcon size={30}/>}<div className="queue-name"><strong title={f.relativePath}>{f.name}</strong><small>{f.relativePath} · {f.compressed?<>原始 {bytes(f.originalSize??f.size)} → {bytes(f.size)} · 已压缩</>:bytes(f.size)}</small>{f.compressionNote&&<small title={f.compressionNote}>{f.compressionNote}</small>}{f.error&&<small className="error-text">{f.error}</small>}</div><div className="item-progress"><Badge status={f.status}/><progress max={100} value={f.status==='preparing'?0:f.progress||0}/></div>{f.url&&<button className="text" onClick={()=>onCopy(f.url)}><Link size={16}/>复制链接</button>}</div>)}</div><div className="pagination"><span>第 {items.length?start+1:0}–{end} 项 · 共 {items.length} 张 · 每页 100 张</span><div><button disabled={activePage<=1} onClick={()=>setPage(activePage-1)} aria-label="上传队列上一页">‹</button><b>{activePage} / {totalPages}</b><button disabled={activePage>=totalPages} onClick={()=>setPage(activePage+1)} aria-label="上传队列下一页">›</button></div></div></>
-}
-
-export async function addBrowserDropForSession(readFiles:()=>Promise<File[]>,addFiles:(files:File[])=>unknown,currentToken:()=>string|null=getToken):Promise<boolean>{
- const initiatingToken=currentToken();const files=await readFiles();if(!initiatingToken||currentToken()!==initiatingToken)return false;await addFiles(files);return true;
 }
 
 export function queueByteStats(items:{size:number,originalSize?:number}[]){const originalBytes=items.reduce((sum,item)=>sum+(item.originalSize??item.size),0);const uploadBytes=items.reduce((sum,item)=>sum+item.size,0);return {originalBytes,uploadBytes,savedPercent:originalBytes?Math.max(0,Math.round((1-uploadBytes/originalBytes)*100)):0}}

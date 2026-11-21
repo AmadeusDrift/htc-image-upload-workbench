@@ -1,4 +1,5 @@
 import { decrypt, encrypt, sha } from './auth';
+import { MAX_EXPORT_PAGE_SIZE } from '../shared/export-limits';
 
 type ExportSnapshot = {
   scope: string;
@@ -100,6 +101,7 @@ export async function exportSnapshotPage({ db, key, actor, url, page, where, arg
     rows = results as ExportRow[];
   }
   return {
+    maxPageSize: MAX_EXPORT_PAGE_SIZE,
     files: rows.slice(0, page.limit).map(({ id, ...file }) => ({ ...file, url: `${url.origin}/img/${id}` })),
     nextCursor: rows.length > page.limit ? rows[page.limit - 1].id : null,
     snapshot: encoded,

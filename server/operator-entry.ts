@@ -15,9 +15,10 @@ export async function operatorStatus(db: D1Database) {
     SELECT p.username,u.id,u.displayName,
       CASE WHEN u.status='active' AND u.role='employee' THEN 1 ELSE 0 END available,
       (SELECT COUNT(DISTINCT deviceId) FROM sessions WHERE userId=u.id AND lastSeen>? AND expiresAt>?) onlineDevices,
-      (SELECT COUNT(DISTINCT deviceId) FROM leases WHERE userId=u.id AND expiresAt>?) uploadingDevices,
-      (SELECT COUNT(*) FROM leases WHERE userId=u.id AND expiresAt>?) uploadSlots,
-      (SELECT COUNT(*) FROM leases WHERE expiresAt>?) globalSlots
+      (SELECT COUNT(DISTINCT deviceId) FROM leases WHERE userId=u.id AND expiresAt>? AND uploadedAt IS NULL) uploadingDevices,
+      (SELECT COUNT(*) FROM leases WHERE userId=u.id AND expiresAt>? AND uploadedAt IS NULL) uploadSlots,
+      (SELECT COUNT(*) FROM leases l WHERE expiresAt>? AND uploadedAt IS NULL
+        AND NOT EXISTS(SELECT 1 FROM upload_pool_members m WHERE m.userId=l.userId)) globalSlots
     FROM profiles p LEFT JOIN users u ON u.username=p.username AND u.role='employee' ORDER BY p.position`)
     .bind(time - OPERATOR_PRESENCE_TTL_MS, time, time, time, time)
     .all<{ username: string; id: string | null; displayName: string | null; available: number; onlineDevices: number; uploadingDevices: number; uploadSlots: number; globalSlots: number }>();

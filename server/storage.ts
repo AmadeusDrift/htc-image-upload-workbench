@@ -18,6 +18,7 @@ export async function presign(
   key: string,
   contentType: string,
   expiresIn = 300,
+  packSha256?: string | null,
 ) {
   const url = new URL(
     `${config.endpoint}/${encodeURIComponent(config.bucket)}/${key.split("/").map(encodeURIComponent).join("/")}`,
@@ -29,10 +30,13 @@ export async function presign(
     service: "s3",
     region: "auto",
   });
+  const headers: Record<string, string> = { "Content-Type": contentType };
+  if (packSha256)
+    headers["x-amz-checksum-sha256"] = btoa(String.fromCharCode(...packSha256.match(/../g)!.map(byte => parseInt(byte, 16))));
   const signed = await signer.sign(url.toString(), {
     method: "PUT",
-    headers: { "Content-Type": contentType },
-    aws: { signQuery: true },
+    headers,
+    aws: { signQuery: true, allHeaders: !!packSha256 },
   });
-  return { uploadUrl: signed.url, headers: { "Content-Type": contentType } };
+  return { uploadUrl: signed.url, headers };
 }

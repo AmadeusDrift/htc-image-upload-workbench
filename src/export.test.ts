@@ -51,4 +51,9 @@ describe('product link export',()=>{
   const table=detailTable([image('001/10.jpg'),image('001/2.jpg')],'name',()=> '时间');
   expect(table.headers).toEqual(['文件名','目录','图片链接','文件大小（字节）','上传时间']);expect(table.rows[0]).toEqual(['2.jpg','001/2.jpg','001/2.jpg',100,'时间']);
  });
+ it('formats detail timestamps in local Chinese date and time, including the existing empty and invalid values',()=>{
+  const values=['2026-03-04T17:02:08.000Z','2026-12-31T16:00:00.000Z','','invalid'];
+  const files=values.map((createdAt,i)=>({...image('001/'+i+'.jpg'),createdAt}));
+  expect(detailTable(files,'name').rows.map(row=>row[4])).toEqual(values.map(value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—'));
+ });
 });

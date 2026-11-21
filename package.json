@@ -1,6 +1,6 @@
 {
   "name": "yuntu-workbench",
-  "version": "1.1.4",
+  "version": "1.5.0",
   "private": true,
   "description": "Company R2 image upload workbench",
   "main": "electron/main.cjs",
@@ -10,9 +10,9 @@
     "build:server": "node scripts/build-worker.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "desktop": "electron .",
+    "desktop": "node scripts/build-picker.cjs && electron .",
     "build:icons": "node scripts/build-icons.cjs",
-    "pack:win": "electron-builder --win nsis --x64 --publish never"
+    "pack:win": "node scripts/build-picker.cjs && electron-builder --win nsis --x64 --publish never"
   },
   "build": {
     "appId": "com.yuntu.workbench",
@@ -26,7 +26,10 @@
       "assets/**/*",
       "package.json",
       "server.json",
-      "!electron/acceptance-main.cjs"
+      "!electron/acceptance-main.cjs",
+      "!electron/native-picker/**/*.cs",
+      "!electron/native-picker/**/*.ps1",
+      "!electron/native-picker/**/*.manifest"
     ],
     "win": {
       "target": [
@@ -38,7 +41,8 @@
     "artifactName": "Yuntu-Workbench-Setup-${version}-${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
-      "node_modules/@img/**/*"
+      "node_modules/@img/**/*",
+      "electron/native-picker/ShellPicker.exe"
     ],
     "nsis": {
       "oneClick": true,

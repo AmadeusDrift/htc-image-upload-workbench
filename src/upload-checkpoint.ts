@@ -53,7 +53,7 @@ export class UploadCheckpoint {
    const limit=mode==='all'?items.length:mode==='one'?Math.min(items.length,layout.saved+CHECKPOINT_PAGE_SIZE)
     :mode==='progress'?layout.saved:Math.min(items.length,mode);
    const meta={
-    ownerId,batchMode:state.batchMode,taskId:state.taskId,clientTaskId:state.clientTaskId,groupId:state.groupId,
+    ownerId,batchMode:state.batchMode,transportMode:state.transportMode,taskId:state.taskId,clientTaskId:state.clientTaskId,groupId:state.groupId,groupTicket:state.groupTicket,
    };
    const expected=items.length+(state.missingCheckpointItems??0);
    const header=JSON.stringify({expected,meta});

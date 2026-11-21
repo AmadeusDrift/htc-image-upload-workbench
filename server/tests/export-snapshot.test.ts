@@ -68,3 +68,27 @@ it('reports coverage only for selected files and excludes expired rows from unfi
   expect(response.body).toMatchObject({ eligibleCount: 1, unfinishedCount: 1, nextCursor: null });
   expect(response.body.files.map((file: any) => file.name)).toEqual(['z-last.jpg']);
 });
+
+it('advertises bounded larger snapshot pages and keeps the cursor continuous across page sizes', async () => {
+  const task = (await request('/api/tasks', { groupId, name: 'Large export' })).body.task;
+  const db = await service.getD1Database('DB');
+  await db.prepare(`WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<4501)
+    INSERT INTO files(id,clientId,taskId,groupId,userId,name,relativePath,size,contentType,sha256,objectKey,status,createdAt,expiresAt)
+    SELECT printf('speed-%05d',n),n,t.id,t.groupId,t.userId,'1.jpg','SKU/1.jpg',100,'image/jpeg','sha',printf('speed-%05d',n),'success',?,?
+    FROM seq JOIN tasks t ON t.id=?`).bind(timestamp, future, task.id).run();
+  const path = `/api/export?taskId=${task.id}`;
+  const first = (await request(path + '&snapshot=new&limit=500')).body;
+  expect(first.files).toHaveLength(500);
+  expect(first.maxPageSize).toBe(4000);
+  const scope = path + '&snapshot=' + encodeURIComponent(first.snapshot);
+  const middle = await request(scope + '&limit=4000&cursor=' + first.nextCursor);
+  expect(middle.status).toBe(200);
+  expect(middle.body.files).toHaveLength(4000);
+  expect(middle.body.files[0].url).toMatch(/speed-00501$/);
+  expect(middle.body.nextCursor).toBe('speed-04500');
+  const last = (await request(scope + '&limit=4000&cursor=' + middle.body.nextCursor)).body;
+  expect(last.files.map((f: any) => f.url.split('/').pop())).toEqual(['speed-04501']);
+  expect(last.nextCursor).toBeNull();
+  expect((await request(scope + '&limit=500&verify=1')).body).toEqual({ verified: true });
+  expect((await request(scope + '&limit=4001')).status).toBe(400);
+});

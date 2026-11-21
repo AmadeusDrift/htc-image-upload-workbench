@@ -1,10 +1,11 @@
+import {tmpdir} from 'node:os';
 import {createRequire} from 'node:module';
 import {promises as fs} from 'node:fs';
 import path from 'node:path';
 import {afterEach,describe,it,expect,vi} from 'vitest';
 const {createManifestStore,createCloseCoordinator}=createRequire(import.meta.url)('../electron/manifest.cjs');
 const directories:string[]=[];
-async function temp(){const dir=await fs.mkdtemp(path.resolve(process.cwd(),'../../work/yuntu-manifest-'));directories.push(dir);return path.join(dir,'progress.json')}
+async function temp(){const dir=await fs.mkdtemp(path.join(tmpdir(),'yuntu-manifest-'));directories.push(dir);return path.join(dir,'progress.json')}
 afterEach(async()=>{await Promise.all(directories.splice(0).map(dir=>fs.rm(dir,{recursive:true,force:true})))});
 function snapshot(name='one.png'){return {ownerId:'alice',groupId:'group',taskId:'task',clientTaskId:'stable-client-task',items:[{id:'item',name,relativePath:name,size:5,contentType:'image/png',status:'pending',progress:0,nativeId:'handle'}]}}
 function handles(file:string){return new Map([['handle',{path:path.join(path.dirname(file),'source.png'),size:5,mtimeMs:100}],['unused',{path:path.join(path.dirname(file),'private.png'),size:7,mtimeMs:200}]])}

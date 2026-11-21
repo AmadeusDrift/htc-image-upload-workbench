@@ -10,6 +10,7 @@ function text(value,label,max,optional=false){
 function normalizeManifest(input,getSource){
  if(!input||typeof input!=='object'||Array.isArray(input)||input.schemaVersion!==undefined&&input.schemaVersion!==1||!Array.isArray(input.items)||input.items.length>20000)throw Error('上传进度格式无效');
  if(input.batchMode!==undefined&&input.batchMode!=='chunked-v1')throw Error('上传进度格式无效：批次处理模式');
+ if(input.transportMode!==undefined&&input.transportMode!=='packed-v1')throw Error('上传进度格式无效：传输模式');
  const ownerId=text(input.ownerId??'','员工标识',150,true);
  const seen=new Set(),referenced=new Map();
  const items=input.items.map(item=>{
@@ -21,12 +22,22 @@ function normalizeManifest(input,getSource){
   if(item.compressed!==undefined){if(typeof item.compressed!=='boolean'||item.compressed&&(item.contentType!=='image/jpeg'||!item.originalSize||item.originalSize<item.size))throw Error('上传进度格式无效：压缩标记');output.compressed=item.compressed}
   if(item.compressionNote!==undefined)output.compressionNote=text(item.compressionNote,'压缩说明',512,true);
   for(const field of ['fileId','nativeId'])if(item[field]!==undefined)output[field]=text(item[field],field,150);
+  if(item.packKey!==undefined||item.packPosition!==undefined){
+   if(input.transportMode!=='packed-v1'||typeof item.packKey!=='string'||!/^[a-zA-Z0-9_-]{1,150}$/.test(item.packKey)||!Number.isInteger(item.packPosition)||item.packPosition<0||item.packPosition>=12)throw Error('上传进度格式无效：上传包成员');
+   output.packKey=item.packKey;output.packPosition=item.packPosition;
+  }
+  if(item.packLeaseId!==undefined||item.packRunId!==undefined){
+   if(!output.packKey)throw Error('上传进度格式无效：上传包回执');
+   output.packLeaseId=text(item.packLeaseId,'上传包租约',120);
+   output.packRunId=text(item.packRunId,'上传包运行标识',120);
+  }
+  if(item.awaitingConfirmation===true)output.awaitingConfirmation=true;
   if(item.sha256!==undefined){if(typeof item.sha256!=='string'||!/^[a-f\d]{64}$/i.test(item.sha256))throw Error('上传进度格式无效：SHA256');output.sha256=item.sha256}
   if(item.url!==undefined){text(item.url,'图片链接',4096);const url=new URL(item.url);if(url.protocol!=='https:'||url.username||url.password||url.searchParams.has('X-Amz-Signature'))throw Error('上传进度格式无效：图片链接');output.url=url.href}
-  if(output.nativeId){const source=getSource(output.nativeId);if(!source||typeof source.path!=='string'||source.path.length>32768||!path.isAbsolute(source.path)||source.path.includes('\0')||source.size!==output.size||!Number.isFinite(source.mtimeMs)||source.mtimeMs<0)throw Error('上传进度缺少可信的源文件记录，请重新选择图片');referenced.set(output.nativeId,{id:output.nativeId,path:source.path,size:source.size,mtimeMs:source.mtimeMs,...(source.preparedImage===true?{preparedImage:true}:{})})}
+  if(output.nativeId){const source=getSource(output.nativeId);if(!source||source.temporaryPack||typeof source.path!=='string'||source.path.length>32768||!path.isAbsolute(source.path)||source.path.includes('\0')||source.size!==output.size||!Number.isFinite(source.mtimeMs)||source.mtimeMs<0)throw Error('上传进度缺少可信的源文件记录，请重新选择图片');referenced.set(output.nativeId,{id:output.nativeId,path:source.path,size:source.size,mtimeMs:source.mtimeMs,...(source.preparedImage===true?{preparedImage:true}:{})})}
   return output;
  });
- return {schemaVersion:1,ownerId,batchMode:input.batchMode,taskId:text(input.taskId,'任务标识',150,true),clientTaskId:text(input.clientTaskId,'客户端任务标识',150,true),groupId:text(input.groupId,'业务账号标识',150,true),items,sources:[...referenced.values()]};
+ return {schemaVersion:1,ownerId,groupTicket:text(input.groupTicket,'上传分组',80,true),batchMode:input.batchMode,transportMode:input.transportMode,taskId:text(input.taskId,'任务标识',150,true),clientTaskId:text(input.clientTaskId,'客户端任务标识',150,true),groupId:text(input.groupId,'业务账号标识',150,true),items,sources:[...referenced.values()]};
 }
 function parseManifest(raw){
  const input=JSON.parse(raw);const sources=new Map();

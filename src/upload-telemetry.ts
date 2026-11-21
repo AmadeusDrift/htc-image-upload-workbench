@@ -1,6 +1,7 @@
 export type UploadTelemetry = {
   quota: number | null;
   transferring: number;
+  used?: number;
   confirming: number;
   waiting: number;
   retrying: number;

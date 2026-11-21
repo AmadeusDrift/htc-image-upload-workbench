@@ -8,9 +8,11 @@ import {
   verifyPassword,
 } from "./auth";
 import { storageConfig, presign } from "./storage";
+import { cleanPackObjects, packKey, PackFields, PACK_TYPE, readPackedImage, registerPacks, verifiedPack } from "./packs";
 import { handleRelease } from "./releases";
 import { exportSnapshotPage } from "./export-snapshot";
-import { GLOBAL_UPLOAD_LIMIT, pruneUploadDemands, reserveUpload, reserveUploadBatch, stopUploadDemand, uploadDemand } from "./concurrency";
+import { MAX_EXPORT_PAGE_SIZE } from "../shared/export-limits";
+import { GLOBAL_UPLOAD_LIMIT, UPLOAD_CONFIRM_LIMIT, pruneUploadDemands, reserveUpload, reserveUploadBatch, stopUploadDemand, uploadDemand } from "./concurrency";
 import { operatorEntryEnabled, operatorEntryThrottled, operatorNameAllowed, operatorStatus } from "./operator-entry";
 type Permissions = {
   upload: boolean;
@@ -28,7 +30,7 @@ type User = {
   mustChangePassword: number;
   permissions: string;
 };
-type FileRow = {
+type FileRow = PackFields & {
   id: string;
   clientId: string;
   taskId: string;
@@ -111,7 +113,7 @@ function cleanName(value: unknown, label = "文件名") {
     fail(400, "文件路径无效");
   return result;
 }
-function cursorPage(url: URL) {
+function cursorPage(url: URL, maxLimit = 500) {
   if (!url.searchParams.has("limit") && !url.searchParams.has("cursor"))
     return null;
   const rawLimit = url.searchParams.get("limit") ?? "500";
@@ -120,9 +122,9 @@ function cursorPage(url: URL) {
     !/^\d+$/.test(rawLimit) ||
     !Number.isSafeInteger(limit) ||
     limit < 1 ||
-    limit > 500
+    limit > maxLimit
   )
-    fail(400, "分页数量必须为1至500的整数");
+    fail(400, `分页数量必须为1至${maxLimit}的整数`);
   const cursor = url.searchParams.get("cursor") ?? "";
   if (cursor.length > 200 || /[\u0000-\u001f]/.test(cursor))
     fail(400, "分页游标无效");
@@ -179,11 +181,42 @@ async function session(env: Env, u: User, device: string) {
     .run();
   return { token, user: publicUser(u), groups: await groupsFor(env, u) };
 }
-async function authenticate(request: Request, env: Env) {
+async function authenticate(request: Request, env: Env, uploadTaskId?: string) {
   const token = request.headers.get("Authorization")?.replace(/^Bearer /, "");
   const device = request.headers.get("X-Device-Id");
   if (!token || !device) fail(401, "请先登录");
   const key = await sha(token!);
+  if (uploadTaskId !== undefined) {
+    const time = Date.now();
+    // One primary round trip. Keep the heartbeat ordered with leave/logout.
+    const [access] = await env.DB.batch([
+      env.DB.prepare(`SELECT u.*, t.id AS uploadTask, t.userId AS owner,
+        g.status AS groupStatus, ug.userId AS member
+        FROM sessions s JOIN users u ON u.id=s.userId
+        LEFT JOIN tasks t ON t.id=?
+        LEFT JOIN groups g ON g.id=t.groupId
+        LEFT JOIN user_groups ug ON ug.groupId=t.groupId AND ug.userId=u.id
+        WHERE s.tokenHash=? AND s.deviceId=? AND s.expiresAt>? AND u.status='active'`)
+        .bind(uploadTaskId, key, device, time),
+      env.DB.prepare(`UPDATE sessions SET lastSeen=?
+        WHERE tokenHash=? AND deviceId=? AND expiresAt>? AND lastSeen<?
+        AND EXISTS (SELECT 1 FROM users WHERE id=sessions.userId AND status='active')`)
+        .bind(time, key, device, time, time - 15000),
+    ]);
+    const u = access.results[0] as (User & {
+      uploadTask: string | null; owner: string | null;
+      groupStatus: string | null; member: string | null;
+    }) | undefined;
+    if (!u) return fail(401, "登录已失效");
+    if (!u.uploadTask) return fail(404, "任务不存在");
+    if (!u.groupStatus) return fail(404, "业务账号不存在");
+    if (u.role !== "admin") {
+      if (u.groupStatus !== "active" || !u.member || !permissions(JSON.parse(u.permissions)).upload)
+        fail(403, "没有此业务账号的操作权限");
+      if (u.owner !== u.id) fail(403, "只能上传自己的文件");
+    }
+    return { u, device: device!, tokenHash: key };
+  }
   const u = await env.DB.prepare(
     "SELECT u.* FROM users u JOIN sessions s ON u.id=s.userId WHERE s.tokenHash=? AND s.deviceId=? AND s.expiresAt>? AND u.status='active'",
   )
@@ -236,6 +269,7 @@ function fileView(f: FileRow, origin: string) {
     error: f.error,
     createdAt: f.createdAt,
     expiresAt: f.expiresAt,
+    ...(f.packLeaderId ? {packLeaderId: f.packLeaderId, packOffset: f.packOffset} : {}),
     url: status === "success" ? `${origin}/img/${f.id}` : "",
   };
 }
@@ -283,6 +317,7 @@ async function handle(request: Request, env: Env) {
       !f.contentType.startsWith("image/")
     )
       fail(404, "图片不存在或已过期");
+    if (f.packLeaderId) return readPackedImage(request, env.BUCKET, f, fail);
     const object =
       method === "HEAD"
         ? await env.BUCKET.head(f.objectKey)
@@ -311,8 +346,9 @@ async function handle(request: Request, env: Env) {
       storageReady: !!(await storageConfig(env)),
       operatorEntryEnabled: operatorEntryEnabled(env),
       batchUpload: true,
+      packedUpload: true,
       limits: { global: 20, perDevice: 20, allocation: "dynamic-device" },
-      version: "1.1.4",
+      version: "1.5.0",
     });
   const b = method === "POST" || method === "PATCH" ? await parse(request) : {};
   if (path === "/api/operator-status" && method === "GET") {
@@ -418,7 +454,8 @@ async function handle(request: Request, env: Env) {
   }
   if (!path.startsWith("/api/"))
     return new Response("Not found", { status: 404 });
-  const { u, device, tokenHash } = await authenticate(request, env);
+  const batchLease = method === "POST" && path.match(/^\/api\/tasks\/([^/]+)\/(upload-leases|confirm-uploads|packs)$/);
+  const { u, device, tokenHash } = await authenticate(request, env, batchLease ? batchLease[1] : undefined);
   if (path === "/api/presence" && method === "GET")
     return json({ ok: true });
   if (path === "/api/presence/leave" && method === "POST") {
@@ -843,6 +880,16 @@ async function handle(request: Request, env: Env) {
     });
   }
   const taskId = path.match(/^\/api\/tasks\/([^/]+)$/);
+  if (taskId && method === "PATCH") {
+    const task = await env.DB.prepare("SELECT groupId,userId FROM tasks WHERE id=?")
+      .bind(taskId[1]).first<{groupId:string;userId:string}>();
+    if (!task) fail(404, "任务不存在");
+    await allow(env,u,task.groupId,"upload");
+    if (task.userId!==u.id && u.role!=="admin") fail(403,"只能重命名自己的任务");
+    const name=text(b.name,"任务名称",200);
+    await env.DB.prepare("UPDATE tasks SET name=? WHERE id=?").bind(name,taskId[1]).run();
+    return json({id:taskId[1],name});
+  }
   if (taskId && method === "GET") {
     const task = await env.DB.prepare("SELECT * FROM tasks WHERE id=?")
       .bind(taskId[1])
@@ -854,14 +901,16 @@ async function handle(request: Request, env: Env) {
     const page = cursorPage(url);
     if (page) {
       const rows = await env.DB.prepare(
-        "SELECT * FROM files WHERE taskId=? AND id>? ORDER BY id LIMIT ?",
+        `SELECT f.*, EXISTS(SELECT 1 FROM leases l WHERE l.fileId=f.id AND l.userId=?
+          AND l.deviceId=? AND l.uploadedAt IS NOT NULL AND l.expiresAt>?) awaitingConfirmation
+        FROM files f WHERE f.taskId=? AND f.id>? ORDER BY f.id LIMIT ?`,
       )
-        .bind(taskId[1], page.cursor, page.limit + 1)
-        .all<FileRow>();
+        .bind(u.id,device,Date.now(),taskId[1], page.cursor, page.limit + 1)
+        .all<FileRow & {awaitingConfirmation:number}>();
       const files = rows.results.slice(0, page.limit);
       return json({
         task,
-        files: files.map((f) => fileView(f, url.origin)),
+        files: files.map((f) => ({...fileView(f, url.origin),...(f.awaitingConfirmation?{awaitingConfirmation:true}:{})})),
         nextCursor:
           rows.results.length > page.limit ? files[files.length - 1].id : null,
       });
@@ -930,13 +979,81 @@ async function handle(request: Request, env: Env) {
       total: tasks.length,
     });
   }
-  const batchLease = path.match(/^\/api\/tasks\/([^/]+)\/upload-leases$/);
-  if (batchLease && method === "POST") {
-    const task = await env.DB.prepare("SELECT id,userId,groupId FROM tasks WHERE id=?")
-      .bind(batchLease[1]).first<{id:string;userId:string;groupId:string}>();
-    if (!task) return fail(404, "任务不存在");
-    await allow(env, u, task.groupId, "upload");
-    if (task.userId !== u.id && u.role !== "admin") fail(403, "只能上传自己的文件");
+  if (batchLease) {
+    const taskId = batchLease[1];
+    if (batchLease[2] === "packs") {
+      await registerPacks(env.DB, taskId, b.packs, fail);
+      return json({ok: true});
+    }
+    if (batchLease[2] === "confirm-uploads") {
+      if (!Array.isArray(b.fileIds) || !b.fileIds.length || b.fileIds.length > UPLOAD_CONFIRM_LIMIT)
+        return fail(400, "待确认图片数量无效");
+      const ids = [...new Set(b.fileIds.map(id => text(id,"文件标识",120)))];
+      if (b.packedReceipts !== undefined && (!Array.isArray(b.packedReceipts) || b.packedReceipts.length>ids.length))
+        fail(400,"图片包确认回执数量无效");
+      const supplied = new Map<string,{fileId:string;leaseId:string;runId:string}>();
+      for (const value of (b.packedReceipts ?? []) as Record<string,unknown>[]) {
+        if (!value || typeof value!=="object") fail(400,"图片包回执无效");
+        const fileId=text(value.fileId,"文件标识",120);
+        if (!ids.includes(fileId) || supplied.has(fileId)) fail(400,"图片包回执成员无效");
+        supplied.set(fileId,{fileId,leaseId:text(value.leaseId,"上传名额",120),runId:text(value.runId,"上传运行标识",120)});
+      }
+      const rows = (await env.DB.prepare(`
+        WITH saved AS (SELECT value->>'$.fileId' fileId,value->>'$.leaseId' leaseId,value->>'$.runId' runId FROM json_each(?))
+        SELECT f.*,COALESCE(a.leaseId,l.id) confirmationLease FROM json_each(?) j CROSS JOIN files f ON f.id=j.value
+        LEFT JOIN saved s ON s.fileId=f.id
+        LEFT JOIN pack_attempts a ON a.leaseId=s.leaseId AND a.leaderId=f.id AND a.generation=f.packGeneration
+          AND a.userId=? AND a.deviceId=? AND a.runId=s.runId
+        LEFT JOIN leases l ON l.fileId=f.id AND l.userId=? AND l.deviceId=? AND l.uploadedAt IS NOT NULL AND l.expiresAt>?
+        WHERE f.taskId=? AND f.expiresAt>?
+      `).bind(JSON.stringify([...supplied.values()]),JSON.stringify(ids),u.id,device,u.id,device,Date.now(),taskId,now()).all<FileRow & {confirmationLease:string|null}>()).results;
+      const pending = rows.filter(row=>row.confirmationLease && (row.status==="uploading" ||
+        (row.packLeaderId===row.id && ["pending","failed"].includes(row.status))));
+      const valid: {fileId: string; leaseId: string; key: string | null; etag: string | null}[] = [], rejected:typeof pending = [];
+      // Bound the number of simultaneous R2 reads within each Worker invocation.
+      for (let i=0;i<pending.length;i+=5) {
+        await Promise.all(pending.slice(i,i+5).map(async row=>{
+          const key=row.packLeaderId ? packKey(row.id,row.confirmationLease!) : row.objectKey;
+          const freshAfter=Date.now()-MAX_CONFIRM_OBJECT_AGE_MS;
+          const object=row.packLeaderId ? await verifiedPack(env.BUCKET,key,row.packSize!,row.packSha256!,freshAfter) : await env.BUCKET.head(key);
+          const matches=object && (row.packLeaderId || (object.size===row.size &&
+            object.httpMetadata?.contentType===row.contentType && object.uploaded.getTime()>=freshAfter));
+          if (matches) valid.push({fileId:row.id,leaseId:row.confirmationLease!,key:row.packLeaderId ? key : null,etag:row.packLeaderId ? object.etag : null});
+          else rejected.push(row);
+        }));
+      }
+      const time=Date.now(), done=JSON.stringify(valid);
+      const missing=JSON.stringify(rejected.map(row=>row.confirmationLease));
+      const successRows = env.DB.prepare(`
+        WITH requested AS MATERIALIZED (SELECT value FROM json_each(?)),
+        matched AS (SELECT f.id FROM requested r CROSS JOIN files f ON f.id=r.value
+          UNION SELECT f.id FROM requested r CROSS JOIN files f ON f.packLeaderId=r.value)
+        SELECT f.* FROM matched CROSS JOIN files f ON f.id=matched.id
+        WHERE f.taskId=? AND f.status='success' AND f.expiresAt>?
+      `).bind(JSON.stringify(ids),taskId,new Date(time).toISOString());
+      const files = pending.length ? (await env.DB.batch<FileRow>([
+        env.DB.prepare(`
+          UPDATE files SET status='success',error=NULL,completedAt=?,expiresAt=?,
+            packObjectKey=j.value->>'$.key',packEtag=j.value->>'$.etag'
+          FROM json_each(?) j
+          WHERE files.id=j.value->>'$.fileId' AND files.status IN('pending','failed','uploading') AND files.expiresAt>?
+            AND ((files.packLeaderId=files.id AND EXISTS(SELECT 1 FROM pack_attempts a WHERE a.leaseId=j.value->>'$.leaseId'
+              AND a.leaderId=files.id AND a.generation=files.packGeneration))
+              OR (files.packLeaderId IS NULL AND j.value->>'$.key' IS NULL AND files.status='uploading' AND EXISTS(
+                SELECT 1 FROM leases l WHERE l.id=j.value->>'$.leaseId' AND l.fileId=files.id AND l.uploadedAt IS NOT NULL AND l.expiresAt>?)))
+        `).bind(new Date(time).toISOString(),new Date(time+IMAGE_RETENTION_MS).toISOString(),done,new Date(time).toISOString(),time),
+        env.DB.prepare(`
+          UPDATE files SET status='pending',error=NULL WHERE status='uploading'
+            AND id IN(SELECT fileId FROM leases WHERE id IN(SELECT value FROM json_each(?)))
+        `).bind(missing),
+        env.DB.prepare(`DELETE FROM leases WHERE fileId IN(SELECT j.value->>'$.fileId' FROM json_each(?) j
+          JOIN files f ON f.id=j.value->>'$.fileId' AND f.status='success') OR id IN(SELECT value FROM json_each(?))`).bind(done,missing),
+        successRows,
+      ])).at(-1)!.results : (await successRows.all<FileRow>()).results;
+      const completed = new Set(files.map(file=>file.packLeaderId || file.id));
+      const retry = new Set([...rejected.map(row=>row.id), ...supplied.keys()].filter(id=>!completed.has(id)));
+      return json({files:files.map(file=>fileView(file,url.origin)),retry:[...retry]});
+    }
     const runId = text(b.runId, "上传运行标识", 120);
     const demand = b.demand;
     if (typeof demand !== "number" || !Number.isInteger(demand) || demand < 0 || demand > GLOBAL_UPLOAD_LIMIT)
@@ -944,19 +1061,31 @@ async function handle(request: Request, env: Env) {
     if (!Array.isArray(b.fileIds) || b.fileIds.length > GLOBAL_UPLOAD_LIMIT || b.fileIds.length > demand)
       fail(400, "一次最多申请 20 张图片的上传名额");
     const fileIds = [...new Set<string>((b.fileIds as unknown[]).map(id => text(id, "文件标识", 120)))];
-    const storage = fileIds.length ? await storageConfig(env) : null;
+    if (b.uploaded !== undefined && (!Array.isArray(b.uploaded) || b.uploaded.length > GLOBAL_UPLOAD_LIMIT))
+      return fail(400,"上传回执数量无效");
+    const uploaded = (b.uploaded as unknown[] | undefined)?.map(value=>{
+      if (!value || typeof value!=="object") return fail(400,"上传回执无效");
+      const receipt=value as Record<string,unknown>;
+      return {fileId:text(receipt.fileId,"文件标识",120),leaseId:text(receipt.leaseId,"上传名额",120)};
+    });
+    const startedAt = Date.now();
+    const [storage, candidateRows] = await Promise.all([
+      fileIds.length ? storageConfig(env) : null,
+      fileIds.length ? env.DB.prepare(
+        "SELECT f.* FROM json_each(?) j CROSS JOIN files f ON f.id=j.value WHERE f.taskId=?"
+      ).bind(JSON.stringify(fileIds), taskId).all<FileRow>() : null,
+    ]);
     if (fileIds.length && !storage) fail(503, "存储未配置");
-    const candidates = fileIds.length ? (await env.DB.prepare(
-      "SELECT f.* FROM json_each(?) j JOIN files f ON f.id=j.value WHERE f.taskId=?"
-    ).bind(JSON.stringify(fileIds), task.id).all<FileRow>()).results : [];
+    const candidates = candidateRows?.results ?? [];
     const byId = new Map(candidates.map(f => [f.id,f]));
     const timestamp = now();
     const eligible = fileIds.filter(id => {
       const file = byId.get(id);
-      return file && file.expiresAt > timestamp && ["pending","failed","uploading"].includes(file.status);
+      return file && (!file.packLeaderId || (b.packed===true && file.id===file.packLeaderId))
+        && file.expiresAt > timestamp && ["pending","failed","uploading"].includes(file.status);
     });
-    const { slots, grants } = await reserveUploadBatch(env.DB, {
-      fileIds: eligible, demand, taskId: task.id, userId: u.id, deviceId: device, runId,
+    const { slots, grants, receipts } = await reserveUploadBatch(env.DB, {
+      fileIds: eligible, demand, taskId, userId: u.id, deviceId: device, runId, uploaded, packed: b.packed===true,
     });
     if (!slots.active) fail(409, "本次上传已暂停，请重新开始");
     const eligibleIds = new Set(eligible);
@@ -964,15 +1093,30 @@ async function handle(request: Request, env: Env) {
       const file = byId.get(fileId);
       return {fileId, file: file ? fileView(file, url.origin) : null};
     });
-    return json({
-      quota: slots.quota, used: slots.used, globalUsed: slots.globalUsed,
-      globalLimit: GLOBAL_UPLOAD_LIMIT, uploadingDevices: slots.uploadingDevices, unavailable,
-      grants: await Promise.all(grants.map(async grant => ({
+    const signedGrants = await Promise.all(grants.map(async grant => ({
         fileId: grant.fileId, leaseId: grant.leaseId,
-        ...(await presign(storage!, grant.objectKey, grant.contentType,
-          Math.max(1, Math.floor((grant.expiresAt - Date.now()) / 1000)))),
+        ...(await presign(storage!, grant.packLeaderId ? packKey(grant.fileId,grant.leaseId) : grant.objectKey,
+          grant.packLeaderId ? PACK_TYPE : grant.contentType,
+          Math.max(1, Math.floor((grant.expiresAt - Date.now()) / 1000)), grant.packSha256)),
         expiresAt: new Date(grant.expiresAt).toISOString(),
-      }))),
+    })));
+    if (fileIds.length || uploaded?.length) {
+      const shortfall = grants.length < eligible.length;
+      console.info({
+        event: "upload.lease_batch", userId: u.id, pool: slots.pool, requested: fileIds.length, eligible: eligible.length,
+        granted: grants.length, acknowledged: receipts.length, demand,
+        deviceQuota: slots.quota, deviceUsed: slots.used, globalUsed: slots.globalUsed,
+        globalLimit: GLOBAL_UPLOAD_LIMIT,
+        deviceQuotaReached: shortfall && slots.used >= slots.quota,
+        globalLimitReached: shortfall && slots.globalUsed >= GLOBAL_UPLOAD_LIMIT,
+        confirmationLimitReached: shortfall && slots.deviceHeld >= UPLOAD_CONFIRM_LIMIT,
+        elapsedMs: Date.now() - startedAt,
+      });
+    }
+    return json({
+      pool: slots.pool, quota: slots.quota, used: slots.used, globalUsed: slots.globalUsed,
+      globalLimit: GLOBAL_UPLOAD_LIMIT, uploadingDevices: slots.uploadingDevices, unavailable, receipts,
+      grants: signedGrants,
     });
   }
   const action = path.match(
@@ -984,6 +1128,8 @@ async function handle(request: Request, env: Env) {
     if (f.userId !== u.id && u.role !== "admin")
       fail(403, "只能上传自己的文件");
     const op = action[2];
+    if (f.packLeaderId && (f.id!==f.packLeaderId || op==="lease" || op==="complete"))
+      fail(409, "此图片已登记为批量上传，请使用图片包接口");
     // A client may lose the response after the successful transaction; confirmation
     // retries remain safe after the consumed lease has been deleted.
     if (op === "complete" && f.status === "success" && f.expiresAt > now()) {
@@ -1002,7 +1148,7 @@ async function handle(request: Request, env: Env) {
       const leaseId = reservation.id, expiresAt = reservation.expiresAt;
       const lease = await reservation.run();
       if (!lease.meta.changes)
-        return json({ error: "正在等待公司上传名额，系统将按设备动态分配" }, 429, {
+        return json({ error: "正在等待上传名额，系统将按设备动态分配" }, 429, {
           "Retry-After": "2",
         });
       try {
@@ -1030,7 +1176,14 @@ async function handle(request: Request, env: Env) {
     )
       .bind(String(b.leaseId || ""), f.id, u.id, device, Date.now())
       .first<{ id: string }>();
-    if (!lease) fail(409, "上传授权已失效");
+    if (!lease) {
+      if (op === "complete" && f.status === "uploading") {
+        const latest = await fileGet(env, f.id);
+        if (latest.status === "success" && latest.expiresAt > now())
+          return json({ file: fileView(latest, url.origin) });
+      }
+      fail(409, "上传授权已失效");
+    }
     if (op === "complete") {
       const object = await env.BUCKET.head(f.objectKey);
       if (
@@ -1044,24 +1197,29 @@ async function handle(request: Request, env: Env) {
       // objects need a fresh PUT before they can start a full seven-day link.
       if (object!.uploaded.getTime() < confirmation - MAX_CONFIRM_OBJECT_AGE_MS)
         fail(409, "云端临时文件已超时，请重新上传");
-      const completed = await env.DB.batch([
+      const [completed] = await env.DB.batch<FileRow>([
         env.DB.prepare(
-          "UPDATE files SET status='success',error=NULL,completedAt=?,expiresAt=? WHERE id=? AND status='uploading' AND EXISTS(SELECT 1 FROM leases WHERE id=? AND expiresAt>?)",
+          "UPDATE files SET status='success',error=NULL,completedAt=?,expiresAt=? WHERE id=? AND status='uploading' AND EXISTS(SELECT 1 FROM leases WHERE id=? AND expiresAt>?) RETURNING *",
         ).bind(new Date(confirmation).toISOString(), new Date(confirmation + IMAGE_RETENTION_MS).toISOString(), f.id, lease!.id, confirmation),
         env.DB.prepare("DELETE FROM leases WHERE id=?").bind(lease!.id),
       ]);
-      if (!completed[0].meta.changes) fail(409, "文件或授权状态已改变");
-      return json({ file: fileView(await fileGet(env, f.id), url.origin) });
+      const confirmed = completed.results[0];
+      if (confirmed) return json({ file: fileView(confirmed, url.origin) });
+      const latest = await fileGet(env, f.id);
+      if (latest.status === "success" && latest.expiresAt > now())
+        return json({ file: fileView(latest, url.origin) });
+      fail(409, "文件或授权状态已改变");
     }
     await env.DB.batch([
-      env.DB.prepare("DELETE FROM leases WHERE id=?").bind(lease!.id),
       env.DB.prepare(
-        "UPDATE files SET status=?,error=? WHERE id=? AND status='uploading'",
+        "UPDATE files SET status=?,error=? WHERE id=? AND status='uploading' AND EXISTS(SELECT 1 FROM leases WHERE id=? AND fileId=files.id AND uploadedAt IS NULL)",
       ).bind(
         op === "fail" ? "failed" : "pending",
         op === "fail" ? String(b.error || "上传失败").slice(0, 500) : null,
         f.id,
+        lease!.id,
       ),
+      env.DB.prepare("DELETE FROM leases WHERE id=? AND uploadedAt IS NULL").bind(lease!.id),
     ]);
     return json({ ok: true });
   }
@@ -1098,7 +1256,7 @@ async function handle(request: Request, env: Env) {
         args.push(url.searchParams.get(key));
       }
     if (exportMode && (url.searchParams.has("snapshot") || url.searchParams.has("verify"))) {
-      return json(await exportSnapshotPage({ db: env.DB, key: env.CONFIG_KEY, actor: u, url, page: cursorPage(url), where, args, fail }));
+      return json(await exportSnapshotPage({ db: env.DB, key: env.CONFIG_KEY, actor: u, url, page: cursorPage(url, MAX_EXPORT_PAGE_SIZE), where, args, fail }));
     }
     if (exportMode) {
       where += " AND f.status='success' AND f.expiresAt>?";
@@ -1197,14 +1355,21 @@ async function handle(request: Request, env: Env) {
     for (const f of files) await allow(env, u, f.groupId, "delete");
     let deleted = 0;
     for (const f of files) {
-      if (f.status === "deleted") continue;
-      await env.DB.batch([
-        env.DB.prepare("UPDATE files SET status='deleted' WHERE id=?").bind(
+      if (f.status === "deleted") {
+        if (f.packObjectKey) await cleanPackObjects(env.DB, env.BUCKET, f.packObjectKey);
+        else if (!f.packLeaderId) await env.BUCKET.delete(f.objectKey);
+        continue;
+      }
+      const [updated] = await env.DB.batch<Pick<FileRow,"packLeaderId"|"packObjectKey">>([
+        env.DB.prepare("UPDATE files SET status='deleted' WHERE id=? AND status<>'deleted' RETURNING packLeaderId,packObjectKey").bind(
           f.id,
         ),
         env.DB.prepare("DELETE FROM leases WHERE fileId=?").bind(f.id),
       ]);
-      await env.BUCKET.delete(f.objectKey);
+      const row = updated.results[0];
+      if (!row) continue;
+      if (row.packObjectKey) await cleanPackObjects(env.DB, env.BUCKET, row.packObjectKey);
+      else if (!row.packLeaderId) await env.BUCKET.delete(f.objectKey);
       deleted++;
     }
     await audit(env, u.id, "files.delete", { ids: b.ids });
@@ -1259,12 +1424,13 @@ export default {
     const time = Date.now(), cutoff = new Date(time).toISOString();
     for (let batch = 0; batch < EXPIRY_BATCHES_PER_SWEEP; batch++) {
       const { results } = await env.DB.prepare(
-        "SELECT id,objectKey FROM files WHERE expiresAt<=? AND status NOT IN('deleted','expired') AND NOT EXISTS(SELECT 1 FROM leases WHERE fileId=files.id AND expiresAt>?) ORDER BY expiresAt,id LIMIT ?",
-      ).bind(cutoff,time,EXPIRY_BATCH_SIZE).all<{id:string;objectKey:string}>();
+        "SELECT id,objectKey,packLeaderId FROM files WHERE expiresAt<=? AND status NOT IN('deleted','expired') AND NOT EXISTS(SELECT 1 FROM leases WHERE fileId=COALESCE(files.packLeaderId,files.id) AND expiresAt>?) ORDER BY expiresAt,id LIMIT ?",
+      ).bind(cutoff,time,EXPIRY_BATCH_SIZE).all<Pick<FileRow,"id"|"objectKey"|"packLeaderId">>();
       if (!results.length) break;
       // Active leases protect confirmations. Old links are already unavailable.
       // Leave the rows eligible for retry if a bucket delete fails.
-      await env.BUCKET.delete(results.map(file=>file.objectKey));
+      const individualKeys = results.filter(file=>!file.packLeaderId).map(file=>file.objectKey);
+      if (individualKeys.length) await env.BUCKET.delete(individualKeys);
       const ids = JSON.stringify(results.map(file=>file.id));
       await env.DB.batch([
         env.DB.prepare(
@@ -1275,6 +1441,8 @@ export default {
       ]);
       if (results.length < EXPIRY_BATCH_SIZE) break;
     }
+    await env.DB.prepare("DELETE FROM pack_attempts WHERE leaseId IN (SELECT leaseId FROM pack_attempts WHERE cleanupAt<=? ORDER BY cleanupAt LIMIT 1000)").bind(time).run();
+    await cleanPackObjects(env.DB, env.BUCKET);
     await env.DB.batch([
       env.DB.prepare("DELETE FROM sessions WHERE expiresAt<=?").bind(
         Date.now(),

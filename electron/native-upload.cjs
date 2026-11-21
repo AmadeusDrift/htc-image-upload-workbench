@@ -2,6 +2,26 @@ const fs=require('node:fs');
 const https=require('node:https');
 const {startUploadClock,storageFailure,uploadFailure}=require('./upload-policy.mjs');
 
+function uploadHeaders(file,target,headers) {
+ const verified={'content-length':file.size};
+ for(const [key,value] of Object.entries(headers||{})){
+  const name=key.toLowerCase();
+  if(!/^(content-type|x-amz-[a-z0-9-]+)$/.test(name)||typeof value!=='string'||/[\r\n]/.test(value)||Object.hasOwn(verified,name))
+   throw uploadFailure('local','上传请求头无效，请联系管理员');
+  verified[name]=value;
+ }
+ const checksum='x-amz-checksum-sha256';
+ if(file.temporaryPack){
+  const signed=target.searchParams.get('X-Amz-SignedHeaders')?.split(';')||[];
+  if(verified['content-type']!=='application/octet-stream'||!signed.includes('content-type')||!signed.includes(checksum)||
+    !/^[a-f\d]{64}$/.test(file.sha256)||verified[checksum]!==Buffer.from(file.sha256,'hex').toString('base64'))
+   throw uploadFailure('local','临时上传包的签名、类型或校验值与本机记录不符');
+ }else if(Object.hasOwn(verified,checksum)){
+  throw uploadFailure('local','原图上传请求包含意外的图片包校验值');
+ }
+ return verified;
+}
+
 function createUploadGate(limit=20,slots=new Map(),sourceTimeoutMs=15000){
  return {slots,async run(id,prepare,transfer){
   if(slots.has(id))throw uploadFailure('local','该文件正在上传');
@@ -100,4 +120,4 @@ async function uploadIpcResult(operation){
   return {ok:false,error:{kind:error?.kind||'local',message:error?.kind?error.message:'本地上传未能启动，请重试或重启软件',status:error?.status,retryAfter:error?.retryAfter}};
  }
 }
-module.exports={createUploadGate,uploadNativeFile,uploadIpcResult};
+module.exports={createUploadGate,uploadNativeFile,uploadIpcResult,uploadHeaders};

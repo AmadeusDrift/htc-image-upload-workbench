@@ -1,6 +1,7 @@
 export interface ExportFile {name:string;relativePath:string;url:string;size:number;createdAt:string;taskId?:string;groupId?:string}
 export interface LinkTable {headers:string[];rows:(string|number)[][]}
-const natural=(a:string,b:string)=>a.localeCompare(b,'zh-CN',{numeric:true})||a.localeCompare(b);
+const numericOrder=new Intl.Collator('zh-CN',{numeric:true});
+const natural=(a:string,b:string)=>a===b?0:numericOrder.compare(a,b)||a.localeCompare(b);
 
 export function productTable(files:readonly ExportFile[]):LinkTable {
  const products=new Map<string,{owner:string;files:{name:string;url:string}[]}>();let largest=0;
@@ -21,7 +22,18 @@ export function productTable(files:readonly ExportFile[]):LinkTable {
  })};
 }
 
-export function detailTable(files:readonly ExportFile[],sort:string,formatDate:(date:string)=>string):LinkTable {
+function localDateFormatter() {
+ const formatter=new Intl.DateTimeFormat('zh-CN',{
+  year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric',hour12:false,
+ });
+ return (value:string)=>{
+  if(!value)return '—';
+  const instant=new Date(value);
+  return Number.isNaN(instant.getTime())?instant.toString():formatter.format(instant);
+ };
+}
+
+export function detailTable(files:readonly ExportFile[],sort:string,formatDate=localDateFormatter()):LinkTable {
  const sorted=[...files].sort((a,b)=>sort==='createdAt'?a.createdAt.localeCompare(b.createdAt):natural(a.name,b.name)||natural(a.relativePath,b.relativePath));
  return {headers:['文件名','目录','图片链接','文件大小（字节）','上传时间'],rows:sorted.map(file=>[file.name,file.relativePath,file.url,file.size,formatDate(file.createdAt)])};
 }

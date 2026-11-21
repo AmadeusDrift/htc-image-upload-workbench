@@ -129,6 +129,7 @@ describe('main process update integration', () => {
  async function mainFixture() {
   const { readFileSync } = await import('node:fs'); const { runInNewContext } = await import('node:vm');
   const handlers = new Map<string, Function>(); const jobs = new Map(); const preparationJobs = new Map();
+  const packSpool = {initialize:vi.fn(async()=>{}),clear:vi.fn(async()=>{}),stats:vi.fn(()=>({outstanding:0}))};
   const updater = Object.assign(new EventEmitter(), { checkForUpdates: vi.fn(async () => null), quitAndInstall: vi.fn() });
   const flush = vi.fn(async () => {}); const closeRequest = vi.fn(async () => true); const guard = vi.fn();
   let window: any, start: Promise<any>, prepareMessage: any, nativeSlots: Map<any, any>;
@@ -143,22 +144,28 @@ describe('main process update integration', () => {
    './security.cjs': { assertTrustedSender: guard }, './titlebar.cjs': { installTitlebar: vi.fn() },
    './manifest.cjs': { createManifestStore: () => ({ flush }), createCloseCoordinator: () => ({ approved: false, request: closeRequest }) },
    './checkpoint.cjs': { createLocalCheckpoint: () => ({ flush }) },
+   './work-queue.cjs': { createWorkQueue: () => ({scanning:false}) },
+   './picker.cjs': { pickPaths: vi.fn(async () => []) },
    './upload-policy.mjs': require('../electron/upload-policy.mjs'),
    './hash.cjs': { createHashReader: () => ({ jobs, hash: vi.fn(async () => 'hash') }) },
    './compression.cjs': { createImagePreparer: () => ({ jobs: preparationJobs, drain: async () => {} }) },
+   './pack-spool.cjs': { createPackSpool: () => packSpool },
    './updater.cjs': require('../electron/updater.cjs'), './native-upload.cjs': { ...require('../electron/native-upload.cjs'), createUploadGate: (limit: number, slots: Map<any, any>) => { nativeSlots = slots; return require('../electron/native-upload.cjs').createUploadGate(limit, slots); } },
    '../server.json': { apiBase: 'https://example.com' }, 'electron-updater': { autoUpdater: updater },
   };
   runInNewContext(readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8'), { require: (name: string) => mocks[name] || require(name), __dirname: 'C:/app/electron', process: { platform: 'win32' }, setTimeout, clearTimeout, setInterval, clearInterval, URL });
   await start!;
   const invoke = (name: string, ...args: any[]) => handlers.get(name)!({}, ...args);
-  return { window, updater, invoke, jobs, preparationJobs, nativeSlots: nativeSlots!, flush, closeRequest, guard, prepare: () => prepareMessage };
+  return { window, updater, invoke, jobs, preparationJobs, packSpool, nativeSlots: nativeSlots!, flush, closeRequest, guard, prepare: () => prepareMessage };
  }
  it('rejects new uploads and native jobs while install preparation is pending, and bypasses ordinary close only after flush', async () => {
   const f = await mainFixture(); f.updater.emit('update-downloaded', { version: '1.1.2' });
   const installing = f.invoke('update-install'); expect(f.prepare()).toHaveProperty('id');
   expect(() => f.invoke('upload-active', true)).toThrow(/更新/);
   await expect(f.invoke('hash', 'file')).rejects.toThrow(/更新/); await expect(f.invoke('upload', {})).rejects.toThrow(/更新/);
+  await expect(f.invoke('prepare-pack','key',['file'],1)).rejects.toThrow(/更新/);
+  await expect(f.invoke('open-work-group','owner')).rejects.toThrow(/更新/);
+  await expect(f.invoke('select-import','owner','files',true)).rejects.toThrow(/更新/);
   f.window.close(); expect(f.closeRequest).not.toHaveBeenCalled(); expect(f.updater.quitAndInstall).not.toHaveBeenCalled();
   f.invoke('ready-to-close', { id: f.prepare().id }); expect(await installing).toMatchObject({ status: 'installing' }); expect(f.flush).toHaveBeenCalledOnce();
   f.window.close(); expect(f.closeRequest).not.toHaveBeenCalled(); expect(f.guard).toHaveBeenCalled(); f.window.emit('closed');
@@ -166,6 +173,7 @@ describe('main process update integration', () => {
  it('includes upload activity, native upload slots, hashing and image preparation in its busy state', async () => {
   const f = await mainFixture(); f.invoke('upload-active', true); expect(f.invoke('update-state').busy).toBe(true); f.invoke('upload-active', false);
   f.nativeSlots.set('upload', {}); expect(f.invoke('update-state').busy).toBe(true); f.nativeSlots.clear();
+  f.packSpool.stats.mockReturnValueOnce({outstanding:1});expect(f.invoke('update-state').busy).toBe(true);
   f.jobs.set('hash', {}); expect(f.invoke('update-state').busy).toBe(true); f.jobs.clear(); f.preparationJobs.set('image', {});
   f.updater.emit('update-downloaded', { version: '1.1.2' }); expect(await f.invoke('update-install')).toMatchObject({ status: 'ready', busy: true, version: '1.1.2' }); expect(f.prepare()).toBeUndefined();
   f.window.emit('closed');

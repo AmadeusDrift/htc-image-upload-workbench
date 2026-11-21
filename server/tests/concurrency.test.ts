@@ -3,6 +3,8 @@ import { UploadEngine, type UploadState } from '../../src/upload';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { build } from 'esbuild';
 import { readFileSync } from 'node:fs';
+import worker from '../index';
+import { operatorStatus } from '../operator-entry';
 
 let mf: Miniflare, db: D1Database, ids: string[], taskId: string, groupId: string, token: Record<string,string> = {};
 async function call(device: string, path: string, body: unknown = {}) {
@@ -12,12 +14,125 @@ async function call(device: string, path: string, body: unknown = {}) {
   return { status:response.status, body:await response.json() as any };
 }
 const lease = (device: string, index: number) => call(device, '/files/' + ids[index] + '/lease');
+it('returns a successful legacy confirmation without rereading the file after the write', async () => {
+  const {body: {leaseId}} = await lease('a', 0);
+  const fileId = ids[0];
+  const row = await db.prepare('SELECT objectKey FROM files WHERE id=?').bind(fileId).first<{objectKey:string}>();
+  const bucket = await mf.getR2Bucket('BUCKET');
+  await bucket.put(row!.objectKey, 'png', {httpMetadata:{contentType:'image/png'}});
+  const statements:string[] = [];
+  const response = await worker.fetch(new Request('http://localhost/api/files/' + fileId + '/complete', {
+    method:'POST',
+    headers:{'Content-Type':'application/json',Authorization:'Bearer '+token.a,'X-Device-Id':'a'},
+    body:JSON.stringify({leaseId}),
+  }), {
+    DB:{
+      prepare(sql:string) { statements.push(sql); return db.prepare(sql); },
+      batch:db.batch.bind(db),
+    },
+    BUCKET:bucket,
+  } as unknown as Env);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({file:{id:fileId,status:'success',url:'http://localhost/img/'+fileId}});
+  expect(statements.filter(sql=>sql==='SELECT * FROM files WHERE id=?')).toHaveLength(1);
+});
+it('confirms a legacy upload exactly once even when the same confirmation is sent concurrently', async () => {
+  const {body: {leaseId}} = await lease('a', 0);
+  const fileId = ids[0];
+  const row = await db.prepare('SELECT objectKey FROM files WHERE id=?').bind(fileId).first<{objectKey:string}>();
+  const bucket = await mf.getR2Bucket('BUCKET');
+  await bucket.put(row!.objectKey, 'png', {httpMetadata:{contentType:'image/png'}});
+  expect((await call('b', '/files/' + fileId + '/complete', {leaseId})).status).toBe(409);
+  const results = await Promise.all(Array.from({length: 8}, () =>
+    call('a', '/files/' + fileId + '/complete', {leaseId}),
+  ));
+  expect(results.map(result => result.status)).toEqual(Array(8).fill(200));
+  expect(new Set(results.map(result => result.body.file.expiresAt)).size).toBe(1);
+  expect(results[0].body.file).toMatchObject({id:fileId,status:'success',url:'http://localhost/img/'+fileId});
+  expect(await db.prepare('SELECT id FROM leases WHERE id=?').bind(leaseId).first()).toBeNull();
+});
+it('logs a device quota block with spare company capacity and no signed URL', async () => {
+  await batch('b', [], 20);
+  await batch('a', ids.slice(0,10), 20);
+  const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+  try {
+    const response = await worker.fetch(new Request('http://localhost/api/tasks/' + taskId + '/upload-leases', {
+      method:'POST',
+      headers:{'Content-Type':'application/json',Authorization:'Bearer '+token.a,'X-Device-Id':'a'},
+      body:JSON.stringify({runId:'a', demand:20, fileIds:[ids[10]]}),
+    }), {
+      DB:db, CONFIG_KEY:'test-config-key',
+      R2_ENDPOINT:'https://test.r2.cloudflarestorage.com', R2_BUCKET_NAME:'test',
+    } as unknown as Env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({grants:[],quota:10,used:10,globalUsed:10});
+    const log = info.mock.calls.find(([value]) => value?.event === 'upload.lease_batch')?.[0];
+    expect(log).toMatchObject({
+      requested:1, eligible:1, granted:0, deviceQuota:10, deviceUsed:10,
+      globalUsed:10, globalLimit:20, deviceQuotaReached:true, globalLimitReached:false,
+    });
+    expect(JSON.stringify(log)).not.toMatch(/X-Amz|Bearer|cloudflarestorage|uploadUrl/);
+  } finally {
+    info.mockRestore();
+  }
+});
+it('refills an acknowledged PUT before confirmation, then confirms it after pause', async () => {
+  const runId = 'receipt-test';
+  const path = '/tasks/' + taskId;
+  const first = await call('a', path + '/upload-leases', {runId, demand:20, fileIds:ids.slice(0,20)});
+  expect(first.body.grants).toHaveLength(20);
+  const {fileId,leaseId} = first.body.grants[0];
+  const file = await db.prepare('SELECT objectKey FROM files WHERE id=?').bind(fileId).first<{objectKey:string}>();
+  const bucket = await mf.getR2Bucket('BUCKET');
+  await bucket.put(file!.objectKey,'png',{httpMetadata:{contentType:'image/png'}});
+  const next = await call('a', path + '/upload-leases', {runId,demand:20,fileIds:[ids[20]],uploaded:[{fileId,leaseId}]});
+  expect(next.body.grants).toHaveLength(1);
+  const get = () => db.prepare('SELECT status FROM files WHERE id=?').bind(fileId).first<{status:string}>();
+  expect((await get())!.status).toBe('uploading');
+  await call('a','/uploads/activity',{runId,active:false});
+  const restored = await mf.dispatchFetch('http://localhost/api'+path+'?limit=100',{
+    headers:{Authorization:'Bearer '+token.a,'X-Device-Id':'a'},
+  });
+  const task = await restored.json() as any;
+  expect(task.files.find((row:any)=>row.id===fileId)).toMatchObject({awaitingConfirmation:true,status:'uploading'});
+  const other = await call('b',path+'/confirm-uploads',{fileIds:[fileId]});
+  expect(other.body.files).toEqual([]);
+  const complete = await call('a',path+'/confirm-uploads',{fileIds:[fileId]});
+  expect(complete.body.files).toMatchObject([{id:fileId,status:'success'}]);
+  expect((await call('a',path+'/confirm-uploads',{fileIds:[fileId]})).body.files).toMatchObject([{id:fileId,status:'success'}]);
+});
+it('applies backpressure when forty files on one device are still awaiting confirmation', async () => {
+  const runId='confirmation-limit-test', path='/tasks/'+taskId;
+  let response=await batch('a',ids.slice(0,20),20,runId);
+  for(let offset=20;offset<=40;offset+=20){
+    const uploaded=response.body.grants.map(({fileId,leaseId}:any)=>({fileId,leaseId}));
+    response=await call('a',path+'/upload-leases',{runId,demand:20,fileIds:ids.slice(offset,offset+20),uploaded});
+    expect(response.body.receipts).toHaveLength(20);
+    expect(response.body.grants).toHaveLength(offset===20?20:0);
+  }
+  expect(response.body.used).toBe(0);
+  const other=await batch('b',ids.slice(60,65),5,'other-device-backpressure-test');
+  expect(other.body.grants).toHaveLength(5);
+});
+it('never publishes a link for an acknowledged PUT that is missing or the wrong size', async () => {
+  const runId='invalid-object-test', path='/tasks/'+taskId;
+  const early=await batch('a',ids.slice(0,2),2,runId);
+  const grants=early.body.grants;
+  const bucket=await mf.getR2Bucket('BUCKET');
+  const row=await db.prepare('SELECT objectKey FROM files WHERE id=?').bind(ids[0]).first<{objectKey:string}>();
+  await bucket.put(row!.objectKey,'wrong size',{httpMetadata:{contentType:'image/png'}});
+  await call('a',path+'/upload-leases',{runId,demand:2,fileIds:[],uploaded:grants.map(({fileId,leaseId}:any)=>({fileId,leaseId}))});
+  const result=await call('a',path+'/confirm-uploads',{fileIds:ids.slice(0,2)});
+  expect(result.body.files).toEqual([]);
+  expect(result.body.retry.sort()).toEqual(ids.slice(0,2).sort());
+  expect((await batch('a',ids.slice(0,2),2,runId)).body.grants).toHaveLength(2);
+});
 async function release(device: string, index: number, response: any) {
   expect((await call(device, '/files/' + ids[index] + '/release', {leaseId:response.body.leaseId})).status).toBe(200);
 }
 beforeAll(async () => {
   const bundle = await build({entryPoints:['server/index.ts'],bundle:true,write:false,format:'esm',platform:'browser'});
-  mf = new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-10-29',d1Databases:['DB','MIGRATION'],r2Buckets:['BUCKET'],bindings:{SETUP_TOKEN:'setup',CONFIG_KEY:'test-config-key',R2_ENDPOINT:'https://test.r2.cloudflarestorage.com',R2_BUCKET_NAME:'test'}}));
+  mf = new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-10-29',d1Databases:['DB','MIGRATION','UPLOAD_MIGRATION'],r2Buckets:['BUCKET'],bindings:{SETUP_TOKEN:'setup',CONFIG_KEY:'test-config-key',R2_ENDPOINT:'https://test.r2.cloudflarestorage.com',R2_BUCKET_NAME:'test'}}));
   db = await mf.getD1Database('DB');
   await db.exec(readFileSync('server/schema.sql','utf8').replace(/\n/g,' '));
   const setup = await call('a','/setup',{setupToken:'setup',username:'alpha',password:'12345678',displayName:'Alpha'});
@@ -40,6 +155,81 @@ it('gives a single device twenty slots and rejects a racing twenty-first',async(
   const responses = await Promise.all(ids.slice(0,21).map((_,i)=>lease('a',i)));
   expect(responses.filter(r=>r.status===200)).toHaveLength(20);
   expect(responses.filter(r=>r.status===429)).toHaveLength(1);
+});
+
+it('rechecks session, task ownership and current group permissions on every batch', async () => {
+  const device = 'batch-access-employee';
+  const {body:{user}} = await call('a','/users',{
+    username:'batch-access',password:'12345678',role:'employee',displayName:'Batch test',
+    groupIds:[groupId],permissions:{upload:true,view:true,export:false,delete:false},
+  });
+  token[device]=(await call(device,'/login',{username:'batch-access',password:'12345678',deviceId:device})).body.token;
+  const {body:{task}}=await call(device,'/tasks',{groupId,name:'Access check'});
+  const request=(id=task.id, sender=device)=>call(sender,'/tasks/'+id+'/upload-leases',{
+    fileIds:[],runId:'batch-access-run',demand:0,
+  });
+  const seen=()=>db.prepare('SELECT lastSeen FROM sessions WHERE userId=? AND deviceId=?')
+    .bind(user.id,device).first<number>('lastSeen');
+  await db.prepare('UPDATE sessions SET lastSeen=0 WHERE userId=?').bind(user.id).run();
+  token['wrong-device']=token[device];
+  expect((await request('missing','wrong-device')).status).toBe(401);
+  expect(await seen()).toBe(0);
+  expect((await request()).status).toBe(200);
+  const refreshed=await seen();
+  expect(refreshed).toBeGreaterThan(0);
+  expect((await request()).status).toBe(200);
+  expect(await seen()).toBe(refreshed);
+  expect((await request(taskId)).status).toBe(403);
+  expect((await request('missing')).status).toBe(404);
+  await db.prepare('UPDATE users SET permissions=? WHERE id=?').bind('{}',user.id).run();
+  expect((await request()).status).toBe(403);
+  await db.prepare('UPDATE users SET permissions=? WHERE id=?').bind('{"upload":true}',user.id).run();
+  await db.prepare('DELETE FROM user_groups WHERE userId=?').bind(user.id).run();
+  expect((await request()).status).toBe(403);
+  await db.prepare('INSERT INTO user_groups VALUES(?,?)').bind(user.id,groupId).run();
+  await db.prepare("UPDATE groups SET status='disabled' WHERE id=?").bind(groupId).run();
+  try {
+    expect((await request()).status).toBe(403);
+    expect((await request(task.id,'a')).status).toBe(200);
+  } finally {
+    await db.prepare("UPDATE groups SET status='active' WHERE id=?").bind(groupId).run();
+  }
+  await db.prepare('DELETE FROM sessions WHERE userId=?').bind(user.id).run();
+  expect((await request()).status).toBe(401);
+});
+
+it('keeps the company pool independent of external batch and legacy uploads', async () => {
+  const externalDevice = 'external-device';
+  const externalUser = (await call('a', '/users', {
+    username: 'external-test', displayName: 'External test', password: 'external-password',
+    role: 'employee', groupIds: [groupId], permissions: {upload:true},
+  })).body.user;
+  await db.prepare("INSERT INTO upload_pool_members(userId,pool) VALUES(?,'external')").bind(externalUser.id).run();
+  const login = await call(externalDevice,'/login',{username:'external-test',password:'external-password',deviceId:externalDevice});
+  token[externalDevice] = login.body.token;
+  await call(externalDevice,'/password',{oldPassword:'external-password',newPassword:'external-new-password'});
+  token[externalDevice] = (await call(externalDevice,'/login',{username:'external-test',password:'external-new-password',deviceId:externalDevice})).body.token;
+  const externalTask = (await call(externalDevice,'/tasks',{groupId,name:'External task'})).body.task.id;
+  const path = '/tasks/' + externalTask;
+  const externalFiles = (await call(externalDevice,path+'/files',{files:ids.slice(0,21).map((_, index)=>({
+    clientId:String(index),name:index+'.png',relativePath:index+'.png',size:3,contentType:'image/png',sha256:'a'.repeat(64),
+  }))})).body.files.map((file: {id:string})=>file.id);
+  const company = await batch('a',ids.slice(0,20),20);
+  expect(company.body.grants).toHaveLength(20);
+  const first = await call(externalDevice, '/files/'+externalFiles[0]+'/lease');
+  expect(first.status).toBe(200);
+  const external = await call(externalDevice,path+'/upload-leases',{
+    runId:'external-run',demand:20,fileIds:externalFiles.slice(1),
+  });
+  expect(external.body).toMatchObject({pool:'external',globalUsed:20,globalLimit:20,quota:20});
+  expect(external.body.grants).toHaveLength(19);
+  const remaining = externalFiles.find(id => id !== externalFiles[0] && !external.body.grants.some((grant: {fileId:string}) => grant.fileId===id));
+  expect(remaining).toBeDefined();
+  expect((await call(externalDevice, '/files/'+remaining+'/lease')).status).toBe(429);
+  const companySnapshot = await batch('a', [], 20);
+  expect(companySnapshot.body).toMatchObject({pool:'company',globalUsed:20,globalLimit:20,quota:20});
+  expect((await operatorStatus(db)).globalSlots).toBe(20);
+  expect(await db.prepare('SELECT count(*) n FROM leases').first()).toEqual({n:40});
 });
 
 it.each([2,3,4])('fairly shares twenty slots across %i devices using the SAME alpha account',async count=>{
@@ -149,8 +339,53 @@ it('applies the additive migration twice without changing old accounts, tasks, f
   expect((await old.prepare('SELECT count(*) n FROM upload_demands').first<any>())!.n).toBe(0);
 });
 
+it('adds the confirmation marker to the old schema while preserving existing upload leases', async () => {
+  const old = await mf.getD1Database('UPLOAD_MIGRATION');
+  await old.exec("CREATE TABLE leases (id TEXT PRIMARY KEY, fileId TEXT NOT NULL, userId TEXT NOT NULL, deviceId TEXT NOT NULL, expiresAt INTEGER NOT NULL, runId TEXT NOT NULL DEFAULT '');");
+  await old.exec("INSERT INTO leases VALUES('legacy-lease','legacy-file','legacy-user','legacy-device',9999999999999,'active-run');");
+  const seed = await old.prepare("SELECT * FROM leases").first();
+  await old.exec(readFileSync('server/migrations/0007-upload-confirmation.sql','utf8').trim());
+  expect(await old.prepare("SELECT * FROM leases").first()).toEqual({...seed, uploadedAt:null});
+});
+
 const batch = (device: string, fileIds: string[], demand: number, runId = device) =>
   call(device, '/tasks/' + taskId + '/upload-leases', {runId, fileIds, demand});
+
+it('resumes after a lost stop, fencing the abandoned run while keeping its saved receipt', async () => {
+  const first = await batch('a',ids.slice(0,20),20,'abandoned');
+  const receipt = first.body.grants[0];
+  await call('a','/tasks/'+taskId+'/upload-leases',{runId:'abandoned',demand:20,fileIds:[ids[20]],uploaded:[receipt]});
+  expect((await batch('a',ids.slice(1,21),20,'resumed')).body.grants).toHaveLength(0);
+  await db.prepare("UPDATE upload_demands SET expiresAt=1 WHERE runId='abandoned'").run();
+  const resumed = await batch('a',ids.slice(1,21),20,'resumed');
+  expect(resumed.body.grants).toHaveLength(20);
+  expect(resumed.body.used).toBe(20);
+  expect(await db.prepare('SELECT uploadedAt FROM leases WHERE id=?').bind(receipt.leaseId).first('uploadedAt')).toBeTruthy();
+  expect((await batch('a',[ids[23]],20,'abandoned')).status).toBe(409);
+  expect((await call('a','/files/'+ids[1]+'/release',{leaseId:first.body.grants[1].leaseId})).status).toBe(409);
+  await call('a','/uploads/activity',{runId:'abandoned',active:false});
+  expect((await db.prepare("SELECT COUNT(*) n FROM leases WHERE runId='resumed'").first('n'))).toBe(20);
+});
+
+it('releases a single-file grant carrying a run ID as soon as its run pauses', async () => {
+  await call('a','/uploads/activity',{runId:'single',active:true});
+  expect((await call('a','/files/'+ids[0]+'/lease',{runId:'single'})).status).toBe(200);
+  await call('a','/uploads/activity',{runId:'single',active:false});
+  expect(await db.prepare('SELECT COUNT(*) n FROM leases').first('n')).toBe(0);
+});
+
+it('keeps another task on the same device and the same task on a different device intact', async () => {
+  const other=(await call('a','/tasks',{groupId,name:'Independent task'})).body.task.id;
+  const ref=(await call('a','/tasks/'+other+'/files',{files:[{clientId:'x',name:'x.png',relativePath:'x.png',size:3,contentType:'image/png',sha256:'a'.repeat(64)}]})).body.files[0].id;
+  const otherGrant=(await call('a','/tasks/'+other+'/upload-leases',{runId:'shared',demand:20,fileIds:[ref]})).body.grants[0];
+  await batch('a',ids.slice(0,4),20,'shared');
+  const peer=(await batch('b',[ids[4]],20,'peer')).body.grants[0];
+  await batch('a',ids.slice(5,10),20,'abandoned');
+  await db.prepare("UPDATE upload_demands SET expiresAt=1 WHERE runId IN ('abandoned','peer','shared')").run();
+  await batch('a',ids.slice(0,4),20,'restart');
+  for(const id of [otherGrant.leaseId,peer.leaseId]) expect(await db.prepare('SELECT id FROM leases WHERE id=?').bind(id).first('id')).toBe(id);
+  expect(await db.prepare("SELECT COUNT(*) n FROM leases WHERE runId='shared'").first('n')).toBe(5);
+});
 
 it('grants all twenty leases in a single request and replays a lost response without extra leases', async () => {
   const requested = ids.slice(0, 20);

@@ -1,0 +1,1 @@
+ALTER TABLE leases ADD COLUMN uploadedAt INTEGER;

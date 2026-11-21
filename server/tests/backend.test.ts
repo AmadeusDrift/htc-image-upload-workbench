@@ -11,9 +11,10 @@ const call = async (
   body?: unknown,
   auth = token,
   device = "device-a",
+  method = body === undefined ? "GET" : "POST",
 ) => {
   const r = await mf.dispatchFetch("http://localhost" + path, {
-    method: body === undefined ? "GET" : "POST",
+    method,
     headers: {
       "Content-Type": "application/json",
       Authorization: "Bearer " + auth,
@@ -571,6 +572,23 @@ describe("Worker integration", () => {
     expect(
       (await call("/api/tasks", { groupId, name: "Legacy request" })).status,
     ).toBe(200);
+  });
+  it("renames the existing upload record and enforces ownership", async () => {
+    const {task}=(await call("/api/tasks",{groupId,name:"原任务"})).body;
+    const endpoint="/api/tasks/"+task.id;
+    const renamed=await call(endpoint,{name:"夏季补图"},token,"device-a","PATCH");
+    expect(renamed).toMatchObject({status:200,body:{id:task.id,name:"夏季补图"}});
+    expect((await call(endpoint+"?limit=1")).body.task.name).toBe("夏季补图");
+    expect((await call(endpoint,{name:"   "},token,"device-a","PATCH")).status).toBe(400);
+    await call("/api/users",{
+      username:"task-renamer",displayName:"同账号员工",password:"Password123!",
+      groupIds:[groupId],permissions:{view:true,upload:true},
+    });
+    const device="task-rename-device";
+    const employee=await call("/api/login",{username:"task-renamer",password:"Password123!",deviceId:device},"",device);
+    const denied=await call(endpoint,{name:"其他人的修改"},employee.body.token,device,"PATCH");
+    expect(denied.status).toBe(403);
+    expect((await call(endpoint+"?limit=1")).body.task.name).toBe("夏季补图");
   });
   it("defaults legacy settings to PNG compression and validates saved quality", async () => {
     const initial = await call("/api/settings");

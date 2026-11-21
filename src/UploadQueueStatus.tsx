@@ -19,14 +19,14 @@ function speedText(speed:number) {
   return Math.round(speed)+' B/s';
 }
 
-export function UploadQueueStatus({queue, online}:{
-  queue:Pick<UploadState,'items'|'status'|'telemetry'>; online:boolean;
+export function UploadQueueStatus({queue, online, measuredBytesPerSecond=0}:{
+  queue:Pick<UploadState,'items'|'status'|'telemetry'|'transportMode'>; online:boolean; measuredBytesPerSecond?:number;
 }) {
   const running=queue.status==='uploading';
   const metrics=running?queue.telemetry:undefined;
   const transferring=metrics?.transferring ?? (running?queue.items.filter(item=>item.status==='uploading').length:0);
   const confirming=metrics?.confirming??0;
-  const used=transferring+confirming;
+  const used=metrics?.used??transferring+confirming;
   const status=running&&!online?'网络已断开'
     : metrics?phases[metrics.phase]
     : transferring?'正在上传':states[queue.status]??'等待上传';
@@ -35,9 +35,10 @@ export function UploadQueueStatus({queue, online}:{
       <strong className="queue-live-state"><i aria-hidden="true" data-active={running&&online}/><span role="status">{status}</span></strong>
       <span>已用 <b>{used} 路</b></span>
       <span>已分配 <b>{metrics?.quota==null?'—':metrics.quota+' 路'}</b></span>
-      <span>实时速度 <b>{speedText(metrics?.bytesPerSecond??0)}</b></span>
+      <span>实时速度 <b>{speedText(running&&online?(metrics?.bytesPerSecond??measuredBytesPerSecond):0)}</b></span>
     </div>
     {metrics&&<div className="queue-live-meta">
+      {queue.transportMode==='packed-v1'&&<span>每个图片包占用 1 路</span>}
       <span>传输 {transferring} 张</span>
       <span>确认 {confirming} 张</span>
       <span>待传 {metrics.waiting} 张</span>
